@@ -1,0 +1,34 @@
+<div class="card status-card"
+     id="job-status"
+     {% if job.status.value in ('queued', 'running') %}
+     hx-get="/jobs/{{ job.id }}/status"
+     hx-trigger="every 1.5s"
+     hx-swap="outerHTML"
+     {% endif %}>
+  <span class="badge {{ job.status.value }}">{{ job.status.value }}</span>
+
+  {% if job.status.value in ('queued', 'running') %}
+    <div class="spinner" style="margin-top:1rem"></div>
+  {% endif %}
+
+  <p class="stage">{{ job.stage }}</p>
+  <p class="label">{{ job.label }}</p>
+
+  {% if job.status.value == 'done' %}
+    <div class="actions" style="justify-content:center;margin-top:1.25rem">
+      {% if job.meeting_id %}
+        <a class="btn btn-primary" href="/meetings/{{ job.meeting_id }}">Ver reunião #{{ job.meeting_id }}</a>
+      {% endif %}
+      {% if job.result_path %}
+        <a class="btn" href="/files?path={{ job.result_path | urlencode }}">Abrir arquivo</a>
+      {% endif %}
+      <a class="btn btn-ghost" href="/">Início</a>
+    </div>
+  {% elif job.status.value == 'error' %}
+    <div class="err-box">{{ job.error }}</div>
+    <div class="actions" style="justify-content:center;margin-top:1rem">
+      <a class="btn" href="/new">Tentar de novo</a>
+      <a class="btn btn-ghost" href="/">Início</a>
+    </div>
+  {% endif %}
+</div>

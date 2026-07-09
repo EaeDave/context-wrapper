@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}{{ m.title }} · meet{% endblock %}
+{% block content %}
+  <h1>{{ m.title }}</h1>
+  <div class="pill-row">
+    <span class="pill"><strong>#{{ meeting_id }}</strong></span>
+    <span class="pill">{{ m.date }}</span>
+    <span class="pill">{{ fmt_duration(m.duration) }}</span>
+    {% for p in m.participants %}
+      <span class="pill">{{ p }}</span>
+    {% endfor %}
+  </div>
+
+  <div class="actions" style="margin-top:0">
+    {% if source_exists %}
+      <form method="post" action="/meetings/{{ meeting_id }}/mix" style="display:inline">
+        <button class="btn" type="submit">Gerar .listen.m4a</button>
+      </form>
+      <a class="btn btn-ghost" href="/files?path={{ m.source | urlencode }}">Baixar fonte</a>
+    {% endif %}
+    {% if md_path %}
+      <a class="btn btn-ghost" href="/files?path={{ md_path | string | urlencode }}">Markdown</a>
+    {% endif %}
+    <a class="btn btn-ghost" href="/">← Voltar</a>
+  </div>
+
+  {% if pending %}
+    <h2>Nomear falantes</h2>
+    <div class="card">
+      <p class="lead" style="margin-bottom:0.75rem">Vozes novas nesta reunião — cadastra no banco pra próximas.</p>
+      {% for label in pending %}
+        <form class="inline-form" method="post" action="/meetings/{{ meeting_id }}/assign">
+          <input type="hidden" name="label" value="{{ label }}" />
+          <span class="pill">{{ label }}</span>
+          <input type="text" name="name" placeholder="Nome real" required />
+          <button class="btn btn-sm btn-primary" type="submit">Salvar</button>
+        </form>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if m.summary %}
+    <h2>Resumo</h2>
+    <div class="card summary">{{ m.summary }}</div>
+  {% endif %}
+
+  <h2>Action items</h2>
+  {% if m.action_items %}
+    <div class="card" style="padding:0.4rem 0.6rem">
+      <table>
+        <thead>
+          <tr>
+            <th>O quê</th>
+            <th>Onde</th>
+            <th>Por</th>
+            <th>Prio</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in m.action_items %}
+            <tr>
+              <td>
+                <strong>{{ item.what }}</strong>
+                {% if item.details %}<div class="meta" style="color:var(--muted);font-size:0.82rem;margin-top:0.2rem">{{ item.details }}</div>{% endif %}
+              </td>
+              <td>{{ item.where or "—" }}</td>
+              <td>{{ item.requested_by or "—" }}</td>
+              <td><span class="prio {{ item.priority }}">{{ item.priority }}</span></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="empty">Nenhum action item (ou processado com --no-llm).</p>
+  {% endif %}
+
+  <h2>Transcript</h2>
+  {% if groups %}
+    <div class="card transcript">
+      {% for g in groups %}
+        <div class="turn">
+          <time>{{ g.start_fmt }}</time>
+          <div class="body">
+            {% set who = g.speaker %}
+            <div class="who {% if who == 'me' %}me{% elif who.startswith('SPEAKER_') %}unknown{% endif %}">{{ who }}</div>
+            <p>{{ g.text }}</p>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="empty">Sem transcript.</p>
+  {% endif %}
+
+  {% if m.source %}
+    <p class="lead" style="margin-top:1.5rem;font-size:0.8rem">Fonte: <code style="color:var(--faint)">{{ m.source }}</code></p>
+  {% endif %}
+{% endblock %}

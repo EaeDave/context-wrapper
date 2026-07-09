@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}meet{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="/">meet <span>·</span> <small>reuniões → ações</small></a>
+      <nav class="nav">
+        <a href="/" class="{% if request.url.path == '/' %}active{% endif %}">Reuniões</a>
+        <a href="/new" class="{% if request.url.path.startswith('/new') %}active{% endif %}">Processar</a>
+        <a href="/speakers" class="{% if request.url.path.startswith('/speakers') %}active{% endif %}">Vozes</a>
+      </nav>
+    </header>
+    <main>
+      {% block content %}{% endblock %}
+    </main>
+    <footer class="foot">localhost · dados em ~/.local/share/meet</footer>
+  </div>
+</body>
+</html>

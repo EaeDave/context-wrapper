@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Job {{ job.id }} · meet{% endblock %}
+{% block content %}
+  <h1>Job</h1>
+  <p class="lead">{{ job.label }} · <code style="color:var(--faint)">{{ job.id }}</code></p>
+
+  {% include "partials/job_status.html" %}
+{% endblock %}

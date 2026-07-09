@@ -121,3 +121,52 @@ def prepare(
         mixed=mixed_path,
         duration=duration,
     )
+
+
+def export_listen_mix(
+    input_path: Path,
+    output_path: Path | None = None,
+    *,
+    mic_track: int = 1,
+    others_track: int = 2,
+) -> Path:
+    """Gera um arquivo de ouvir com as tracks misturadas (mic + desktop).
+
+    Saída padrão: mesmo diretório/nome do vídeo com sufixo ``.listen.m4a``.
+    1 stream de áudio → remux/reencode da track única (sem amix).
+    """
+    n_streams = probe_audio_streams(input_path)
+    if output_path is None:
+        output_path = input_path.with_suffix("").with_name(
+            f"{input_path.stem}.listen.m4a"
+        )
+    output_path = Path(output_path)
+
+    if n_streams < 2:
+        _run_ffmpeg([
+            "-i", str(input_path),
+            "-map", "0:a:0",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            str(output_path),
+        ])
+        return output_path
+
+    mic_idx = mic_track - 1
+    others_idx = others_track - 1
+    # normalize=0: amix default divide por N e abaixa tudo; sem isso o mix
+    # fica artificialmente quieto. duration=longest cobre tracks de tamanhos
+    # levemente diferentes.
+    filter_str = (
+        f"[0:a:{mic_idx}][0:a:{others_idx}]"
+        f"amix=inputs=2:duration=longest:normalize=0,"
+        f"alimiter=limit=0.95"
+    )
+    _run_ffmpeg([
+        "-i", str(input_path),
+        "-filter_complex", filter_str,
+        "-c:a", "aac",
+        "-b:a", "192k",
+        str(output_path),
+    ])
+    return output_path

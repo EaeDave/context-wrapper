@@ -14,6 +14,11 @@ dependencies = [
     "openai>=1.50",
     "httpx>=0.27",
     "numpy>=1.26",
+    # UI web local
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.12",
     # exigidas pelo ctranslate2 (faster-whisper); versões ditadas pelo torch cu128
     "nvidia-cublas-cu12",
     "nvidia-cudnn-cu12",
@@ -31,6 +36,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/meet"]
+
+# templates + CSS da UI web
+[tool.hatch.build.targets.wheel.force-include]
+"src/meet/web/templates" = "meet/web/templates"
+"src/meet/web/static" = "meet/web/static"
 
 # torch alinhado com CUDA 12 (mesmo major que o ctranslate2/faster-whisper usa),
 # evitando dois runtimes CUDA no mesmo processo.

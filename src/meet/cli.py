@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shutil
-import tempfile
 from pathlib import Path
 from typing import Annotated
 
@@ -72,7 +71,7 @@ def process(
     ] = False,
 ) -> None:
     """Processa uma gravação de reunião: áudio → transcript → diarização → action items."""
-    from datetime import date
+    from .pipeline import run_pipeline
 
     if not video.exists():
         err_console.print(f"[red]Erro:[/red] Arquivo não encontrado: {video}")
@@ -84,196 +83,43 @@ def process(
         err_console.print(f"[red]Erro ao carregar configurações:[/red] {exc}")
         raise typer.Exit(1)
 
-    workdir = Path(tempfile.mkdtemp(prefix="meet-"))
+    def on_progress(msg: str) -> None:
+        console.print(f"[cyan]{msg}[/cyan]")
+
     try:
-        _run_pipeline(
-            video=video,
+        meeting_id, result, md_path = run_pipeline(
+            video,
+            settings=settings,
+            store=store,
             title=title,
             mic_track=mic_track,
             others_track=others_track,
             no_llm=no_llm,
-            settings=settings,
-            store=store,
-            workdir=workdir,
-            today=date.today().isoformat(),
+            keep_wav=keep_wav,
+            on_progress=on_progress,
         )
-    except typer.Exit:
-        raise
     except Exception as exc:
-        err_console.print(f"[red]Erro inesperado:[/red] {exc}")
-        raise typer.Exit(1)
-    finally:
-        if not keep_wav:
-            shutil.rmtree(workdir, ignore_errors=True)
-
-
-def _run_pipeline(  # noqa: PLR0912, PLR0915
-    *,
-    video: Path,
-    title: str | None,
-    mic_track: int,
-    others_track: int,
-    no_llm: bool,
-    settings: object,
-    store: object,
-    workdir: Path,
-    today: str,
-) -> None:
-    """Núcleo do pipeline; todos os imports pesados ficam aqui."""
-    # Imports pesados sempre dentro da função
-    from . import audio as audio_mod
-    from . import diarize as diarize_mod
-    from . import merge as merge_mod
-    from . import transcribe as transcribe_mod
-    from . import voicebank as voicebank_mod
-    from .models import ActionItem, MeetingResult
-    from .store import Store
-
-    assert isinstance(store, Store)
-
-    # --- Preparar áudio ---
-    console.print("[cyan]Preparando áudio...[/cyan]")
-    try:
-        tracks = audio_mod.prepare(video, workdir, mic_track, others_track)
-    except Exception as exc:
-        err_console.print(f"[red]Erro ao preparar áudio:[/red] {exc}")
+        err_console.print(f"[red]Erro:[/red] {exc}")
         raise typer.Exit(1)
 
-    # --- Transcrição + Diarização ---
-    embeddings: dict[str, object] = {}
-
-    if tracks.mic is not None:
-        # Dual-track: microfone separado dos demais participantes
-        console.print("[cyan]Transcrevendo microfone...[/cyan]")
-        try:
-            mic_segs = transcribe_mod.transcribe(tracks.mic, settings)
-        except Exception as exc:
-            err_console.print(f"[red]Erro ao transcrever microfone:[/red] {exc}")
-            raise typer.Exit(1)
-
-        console.print("[cyan]Transcrevendo outros participantes...[/cyan]")
-        try:
-            others_segs = transcribe_mod.transcribe(tracks.others, settings)
-        except Exception as exc:
-            err_console.print(f"[red]Erro ao transcrever outros participantes:[/red] {exc}")
-            raise typer.Exit(1)
-
-        console.print("[cyan]Diarizando...[/cyan]")
-        try:
-            turns, embeddings = diarize_mod.diarize(tracks.others, settings)
-        except RuntimeError as exc:
-            err_console.print(f"[red]Erro na diarização:[/red] {exc}")
-            raise typer.Exit(1)
-        except Exception as exc:
-            err_console.print(f"[red]Erro inesperado na diarização:[/red] {exc}")
-            raise typer.Exit(1)
-
-        others_segs = merge_mod.assign_speakers(others_segs, turns)
-        segments = merge_mod.combine(mic_segs, others_segs)
-    else:
-        # Single-track: mixdown
-        console.print(
-            "[yellow]Aviso: gravação com 1 track de áudio só — sem separação"
-            " automática da sua voz ('me'). Se gravou no OBS, use formato mkv"
-            " com Audio Track 1 e 2 (mp4 mantém apenas a track 1).[/yellow]"
-        )
-        console.print("[cyan]Transcrevendo...[/cyan]")
-        try:
-            segments = transcribe_mod.transcribe(tracks.mixed, settings)
-        except Exception as exc:
-            err_console.print(f"[red]Erro ao transcrever:[/red] {exc}")
-            raise typer.Exit(1)
-
-        console.print("[cyan]Diarizando...[/cyan]")
-        try:
-            turns, embeddings = diarize_mod.diarize(tracks.mixed, settings)
-        except RuntimeError as exc:
-            err_console.print(f"[red]Erro na diarização:[/red] {exc}")
-            raise typer.Exit(1)
-        except Exception as exc:
-            err_console.print(f"[red]Erro inesperado na diarização:[/red] {exc}")
-            raise typer.Exit(1)
-
-        segments = merge_mod.assign_speakers(segments, turns)
-
-    # --- Banco de vozes ---
-    console.print("[cyan]Resolvendo falantes...[/cyan]")
-    mapping = voicebank_mod.resolve(embeddings, store, settings.similarity_threshold)
-    unresolved = [label for label, name in mapping.items() if label == name]
-    segments = merge_mod.rename_speakers(segments, mapping)
-    participants = sorted({s.speaker for s in segments if s.speaker})
-
-    # --- Extração LLM ---
-    summary = ""
-    action_items: list[ActionItem] = []
-    suggested_title = ""
-
-    if not no_llm:
-        console.print("[cyan]Extraindo action items com LLM...[/cyan]")
-        from . import extract as extract_mod
-
-        try:
-            summary, action_items, suggested_title = extract_mod.extract(
-                segments, participants, settings
-            )
-        except ValueError as exc:
-            err_console.print(f"[red]Erro ao parsear resposta do LLM:[/red] {exc}")
-            raise typer.Exit(1)
-        except Exception as exc:
-            err_console.print(f"[red]Erro na extração LLM:[/red] {exc}")
-            raise typer.Exit(1)
-
-    # --- Montar resultado ---
-    meeting_title = title or suggested_title or video.stem
-
-    result = MeetingResult(
-        source=str(video),
-        date=today,
-        title=meeting_title,
-        duration=tracks.duration,
-        participants=participants,
-        summary=summary,
-        action_items=action_items,
-        segments=segments,
-    )
-
-    # --- Render e salvar markdown ---
-    from . import render as render_mod
-
-    md_content = render_mod.to_markdown(result)
-    filename = render_mod.meeting_filename(result)
-    md_path = settings.output_dir / filename
-    md_path.write_text(md_content, encoding="utf-8")
-
-    meeting_id = store.save_meeting(result, md_path)
-
-    # --- Embeddings pendentes (falantes não reconhecidos) ---
-    if unresolved:
-        import numpy as np
-
-        pending_dir = settings.data_dir / "pending"
-        pending_dir.mkdir(parents=True, exist_ok=True)
-        pending_data = {lbl: embeddings[lbl] for lbl in unresolved if lbl in embeddings}
-        if pending_data:
-            np.savez(str(pending_dir / f"{meeting_id}.npz"), **pending_data)
-
-    # --- Saída ---
-    console.print(f"\n[bold green]✓ Reunião {meeting_id}:[/bold green] {meeting_title}")
-    console.print(f"  Data: {today} | Duração: {_fmt_duration(tracks.duration)}")
+    console.print(f"\n[bold green]✓ Reunião {meeting_id}:[/bold green] {result.title}")
+    console.print(f"  Data: {result.date} | Duração: {_fmt_duration(result.duration)}")
     console.print(f"  Arquivo: {md_path}")
 
-    if summary:
-        console.print(f"\n[bold]Resumo:[/bold]\n{summary}")
+    if result.summary:
+        console.print(f"\n[bold]Resumo:[/bold]\n{result.summary}")
 
-    if action_items:
+    if result.action_items:
         tbl = Table(title="Action Items", show_lines=True)
         tbl.add_column("O quê", style="bold")
         tbl.add_column("Onde")
         tbl.add_column("Prioridade")
-        for item in action_items:
+        for item in result.action_items:
             tbl.add_row(item.what, item.where or "", item.priority)
         console.print(tbl)
 
+    speakers = {s.speaker for s in result.segments if s.speaker}
+    unresolved = sorted(s for s in speakers if s and s.startswith("SPEAKER_"))
     if unresolved:
         console.print(
             "\n[yellow]Falantes não reconhecidos:[/yellow] " + ", ".join(unresolved)
@@ -283,6 +129,43 @@ def _run_pipeline(  # noqa: PLR0912, PLR0915
             console.print(
                 f"  [cyan]meet speakers assign {meeting_id} {lbl} NOME[/cyan]"
             )
+
+
+# ---------------------------------------------------------------------------
+# meet serve (UI web)
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def serve(
+    host: Annotated[str, typer.Option("--host", help="Bind address")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", "-p", help="Porta HTTP")] = 8741,
+    open_browser: Annotated[
+        bool,
+        typer.Option("--open/--no-open", help="Abrir navegador ao subir"),
+    ] = True,
+) -> None:
+    """Sobe a interface web local para gerir reuniões."""
+    try:
+        import uvicorn
+    except ImportError as exc:
+        err_console.print(
+            "[red]Dependências web ausentes.[/red] Rode: uv sync"
+        )
+        raise typer.Exit(1) from exc
+
+    from .web.app import create_app
+
+    url = f"http://{host}:{port}"
+    console.print(f"[bold green]meet UI[/bold green] → {url}")
+    if open_browser:
+        import threading
+        import webbrowser
+
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+
+    uvicorn.run(create_app(), host=host, port=port, log_level="info")
+
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +273,125 @@ def speakers_rm(
 
     store.delete_voice(name)
     console.print(f"[green]✓[/green] Voz '{name}' removida do banco.")
+
+
+# ---------------------------------------------------------------------------
+# meet play / meet mix — ouvir gravação multi-track
+# ---------------------------------------------------------------------------
+
+
+def _resolve_player() -> str | None:
+    """Retorna o player disponível (mpv preferido, depois ffplay)."""
+    for name in ("mpv", "ffplay"):
+        if shutil.which(name):
+            return name
+    return None
+
+
+@app.command()
+def play(
+    video: Annotated[Path, typer.Argument(help="Gravação multi-track (mkv/mp4)")],
+    mic_track: Annotated[
+        int,
+        typer.Option("--mic-track", help="Índice da faixa do microfone, 1-based"),
+    ] = 1,
+    others_track: Annotated[
+        int,
+        typer.Option("--others-track", help="Índice da faixa desktop/Discord, 1-based"),
+    ] = 2,
+) -> None:
+    """Toca a gravação com mic + desktop misturados (pra ouvir a reunião completa)."""
+    import subprocess
+
+    from . import audio as audio_mod
+
+    if not video.exists():
+        err_console.print(f"[red]Erro:[/red] Arquivo não encontrado: {video}")
+        raise typer.Exit(1)
+
+    player = _resolve_player()
+    if player is None:
+        err_console.print(
+            "[red]Erro:[/red] Nenhum player encontrado (instale mpv ou ffplay)."
+        )
+        err_console.print(
+            "[dim]Alternativa: uv run meet mix VIDEO  → gera um .listen.m4a[/dim]"
+        )
+        raise typer.Exit(1)
+
+    try:
+        n = audio_mod.probe_audio_streams(video)
+    except Exception as exc:
+        err_console.print(f"[red]Erro ao ler áudio:[/red] {exc}")
+        raise typer.Exit(1)
+
+    if n < 2:
+        console.print("[dim]1 track só — tocando direto.[/dim]")
+        cmd = [player, str(video)] if player == "mpv" else [player, "-autoexit", str(video)]
+        raise typer.Exit(subprocess.call(cmd))
+
+    mic_idx = mic_track - 1
+    others_idx = others_track - 1
+    console.print(
+        f"[dim]Misturando tracks {mic_track}+{others_track} → {player}…[/dim]"
+    )
+
+    if player == "mpv":
+        # aid1/aid2 = 1-based stream indices no mpv
+        lavfi = (
+            f"[aid{mic_track}][aid{others_track}]"
+            f"amix=inputs=2:duration=longest:normalize=0[ao]"
+        )
+        cmd = ["mpv", f"--lavfi-complex={lavfi}", str(video)]
+        raise typer.Exit(subprocess.call(cmd))
+
+    # ffplay: amix via filter_complex
+    fc = (
+        f"[0:a:{mic_idx}][0:a:{others_idx}]"
+        f"amix=inputs=2:duration=longest:normalize=0[a]"
+    )
+    cmd = [
+        "ffplay", "-autoexit",
+        "-i", str(video),
+        "-filter_complex", fc,
+        "-map", "[a]",
+    ]
+    raise typer.Exit(subprocess.call(cmd))
+
+
+@app.command()
+def mix(
+    video: Annotated[Path, typer.Argument(help="Gravação multi-track (mkv/mp4)")],
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Arquivo de saída (default: VIDEO.listen.m4a)"),
+    ] = None,
+    mic_track: Annotated[
+        int,
+        typer.Option("--mic-track", help="Índice da faixa do microfone, 1-based"),
+    ] = 1,
+    others_track: Annotated[
+        int,
+        typer.Option("--others-track", help="Índice da faixa desktop/Discord, 1-based"),
+    ] = 2,
+) -> None:
+    """Exporta um .m4a com mic + desktop misturados pra ouvir depois (duplo-clique)."""
+    from . import audio as audio_mod
+
+    if not video.exists():
+        err_console.print(f"[red]Erro:[/red] Arquivo não encontrado: {video}")
+        raise typer.Exit(1)
+
+    try:
+        out = audio_mod.export_listen_mix(
+            video, output, mic_track=mic_track, others_track=others_track
+        )
+    except Exception as exc:
+        err_console.print(f"[red]Erro ao misturar:[/red] {exc}")
+        raise typer.Exit(1)
+
+    console.print(f"[green]✓[/green] Mix de ouvir: [bold]{out}[/bold]")
+    console.print("[dim]Abre no player normal — as duas vozes juntas.[/dim]")
 
 
 # ---------------------------------------------------------------------------

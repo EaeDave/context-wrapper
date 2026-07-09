@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from meet.audio import prepare
+from meet.audio import export_listen_mix, prepare
 
 FFMPEG_MISSING = shutil.which("ffmpeg") is None
 pytestmark = pytest.mark.skipif(FFMPEG_MISSING, reason="ffmpeg not installed")
@@ -179,3 +179,36 @@ def test_prepare_two_tracks_duration_positive(tmp_path: Path) -> None:
 
     tracks = prepare(src, tmp_path / "work")
     assert tracks.duration > 0.0
+
+
+# ---------------------------------------------------------------------------
+# export_listen_mix — arquivo de consulta humana (mic + desktop)
+# ---------------------------------------------------------------------------
+
+def test_export_listen_mix_default_path(tmp_path: Path) -> None:
+    src = tmp_path / "meeting.mkv"
+    _make_two_stream_mkv(src)
+
+    out = export_listen_mix(src)
+    assert out == tmp_path / "meeting.listen.m4a"
+    assert out.exists()
+    assert out.stat().st_size > 0
+
+
+def test_export_listen_mix_custom_output(tmp_path: Path) -> None:
+    src = tmp_path / "meeting.mkv"
+    _make_two_stream_mkv(src)
+    dest = tmp_path / "ouvir.m4a"
+
+    out = export_listen_mix(src, dest)
+    assert out == dest
+    assert dest.exists()
+
+
+def test_export_listen_mix_single_track(tmp_path: Path) -> None:
+    src = tmp_path / "solo.wav"
+    _make_sine_wav(src)
+
+    out = export_listen_mix(src, tmp_path / "solo.listen.m4a")
+    assert out.exists()
+    assert out.stat().st_size > 0

@@ -100,6 +100,32 @@ uv run meet process reuniao.mkv --no-llm   # só transcript diarizado
 Saída: `~/reunioes/YYYY-MM-DD-titulo.md` com resumo, tabela de action items
 (o quê / onde / detalhes técnicos / quem pediu / prioridade) e transcript completo.
 
+### Ouvir a gravação completa (mic + Discord)
+
+O mkv multi-track mantém as faixas **separadas** (bom pro pipeline). Player
+normal só toca a track 1. Pra escutar **você + o pessoal** juntos:
+
+```sh
+uv run meet play reuniao.mkv     # toca o mix na hora (mpv/ffplay)
+uv run meet mix  reuniao.mkv     # gera reuniao.listen.m4a (duplo-clique depois)
+```
+
+O `.listen.m4a` é só pra consulta humana — o `process` continua usando as
+tracks separadas do mkv original.
+
+### Interface web
+
+UI local minimalista: listar reuniões, processar gravações, acompanhar jobs,
+ver transcript/action items, nomear falantes, buscar no histórico.
+
+```sh
+uv run meet serve            # http://127.0.0.1:8741 (abre o browser)
+uv run meet serve --no-open  # só sobe o servidor
+uv run meet serve -p 9000    # outra porta
+```
+
+Só escuta em `127.0.0.1` por padrão (dados de reunião ficam na máquina).
+
 ### Banco de vozes
 
 Na primeira reunião os falantes saem como `SPEAKER_00`, `SPEAKER_01`...

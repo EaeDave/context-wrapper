@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Reuniões · meet{% endblock %}
+{% block content %}
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+    <div>
+      <h1>Reuniões</h1>
+      <p class="lead">Histórico processado, busca e jobs recentes.</p>
+    </div>
+    <a class="btn btn-primary" href="/new">+ Processar gravação</a>
+  </div>
+
+  <form class="search-bar" method="get" action="/">
+    <input type="search" name="q" value="{{ q }}" placeholder="Buscar falas, action items…" autofocus />
+    <button class="btn" type="submit">Buscar</button>
+  </form>
+
+  {% if q %}
+    <h2>Resultados</h2>
+    {% if results %}
+      <div class="stack">
+        {% for r in results %}
+          <div class="row">
+            <div>
+              <a class="title" href="/meetings/{{ r.meeting_id }}">{{ r.title }}</a>
+              <div class="meta">{{ r.date }} · {{ r.kind }} · {{ r.snippet }}</div>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="empty">Nada encontrado para “{{ q }}”.</p>
+    {% endif %}
+  {% endif %}
+
+  {% if jobs %}
+    <h2>Jobs recentes</h2>
+    <div class="stack">
+      {% for job in jobs %}
+        <div class="row">
+          <div>
+            <a class="title" href="/jobs/{{ job.id }}">{{ job.label }}</a>
+            <div class="meta">{{ job.kind }} · {{ job.stage }}</div>
+          </div>
+          <span class="badge {{ job.status.value }}">{{ job.status.value }}</span>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <h2>Todas</h2>
+  {% if meetings %}
+    <div class="stack">
+      {% for mid, date, title in meetings %}
+        <div class="row">
+          <div>
+            <a class="title" href="/meetings/{{ mid }}">{{ title }}</a>
+            <div class="meta">#{{ mid }} · {{ date }}</div>
+          </div>
+          <span class="meta">abrir →</span>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="card empty">
+      Nenhuma reunião ainda.<br />
+      <a href="/new">Processe a primeira gravação</a>
+    </div>
+  {% endif %}
+{% endblock %}
