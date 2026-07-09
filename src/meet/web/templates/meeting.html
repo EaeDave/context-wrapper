@@ -13,16 +13,39 @@
 
   <div class="actions" style="margin-top:0">
     {% if source_exists %}
-      <form method="post" action="/meetings/{{ meeting_id }}/mix" style="display:inline">
-        <button class="btn" type="submit">Gerar .listen.m4a</button>
-      </form>
       <a class="btn btn-ghost" href="/files?path={{ m.source | urlencode }}">Baixar fonte</a>
+      <a class="btn btn-ghost" href="/meetings/{{ meeting_id }}/audio">Baixar mix</a>
+      <form method="post" action="/meetings/{{ meeting_id }}/mix" style="display:inline">
+        <button class="btn btn-ghost" type="submit" title="Regenera o .listen.m4a em background">Remixar</button>
+      </form>
     {% endif %}
     {% if md_path %}
       <a class="btn btn-ghost" href="/files?path={{ md_path | string | urlencode }}">Markdown</a>
     {% endif %}
     <a class="btn btn-ghost" href="/">← Voltar</a>
   </div>
+
+  {% if source_exists %}
+    <h2>Ouvir</h2>
+    <div class="card player-card">
+      <p class="player-label">
+        Mic + desktop misturados
+        {% if not mix_ready %}
+          <span class="player-hint">· primeira vez gera o mix (alguns segundos)</span>
+        {% endif %}
+      </p>
+      <audio
+        class="player"
+        controls
+        preload="metadata"
+        src="/meetings/{{ meeting_id }}/audio"
+        controlsList="nodownload"
+      >
+        Seu browser não toca áudio embutido —
+        <a href="/meetings/{{ meeting_id }}/audio">baixe o mix</a>.
+      </audio>
+    </div>
+  {% endif %}
 
   {% if pending %}
     <h2>Nomear falantes</h2>

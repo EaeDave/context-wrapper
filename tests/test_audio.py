@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from meet.audio import export_listen_mix, prepare
+from meet.audio import ensure_listen_mix, export_listen_mix, listen_mix_path, prepare
 
 FFMPEG_MISSING = shutil.which("ffmpeg") is None
 pytestmark = pytest.mark.skipif(FFMPEG_MISSING, reason="ffmpeg not installed")
@@ -212,3 +212,26 @@ def test_export_listen_mix_single_track(tmp_path: Path) -> None:
     out = export_listen_mix(src, tmp_path / "solo.listen.m4a")
     assert out.exists()
     assert out.stat().st_size > 0
+
+
+def test_listen_mix_path_naming(tmp_path: Path) -> None:
+    src = tmp_path / "call.mkv"
+    assert listen_mix_path(src) == tmp_path / "call.listen.m4a"
+
+
+def test_ensure_listen_mix_caches(tmp_path: Path) -> None:
+    src = tmp_path / "meeting.mkv"
+    _make_two_stream_mkv(src)
+
+    first = ensure_listen_mix(src)
+    mtime1 = first.stat().st_mtime
+    size1 = first.stat().st_size
+
+    second = ensure_listen_mix(src)
+    assert second == first
+    assert second.stat().st_mtime == mtime1
+    assert second.stat().st_size == size1
+
+    forced = ensure_listen_mix(src, force=True)
+    assert forced == first
+    assert forced.stat().st_size > 0

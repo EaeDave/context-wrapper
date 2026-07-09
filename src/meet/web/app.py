@@ -203,13 +203,17 @@ def create_app() -> FastAPI:
 
     @app.get("/meetings/{meeting_id}", response_class=HTMLResponse)
     def meeting_detail(request: Request, meeting_id: int) -> HTMLResponse:
+        from ..audio import listen_mix_path
+
         settings, store = _settings_store()
         result = store.get_meeting(meeting_id)
         if result is None:
             raise HTTPException(404, "Reunião não encontrada")
         groups = _group_transcript(result.segments)
         pending = _pending_labels(settings, meeting_id)
-        source_exists = Path(result.source).is_file()
+        source = Path(result.source)
+        source_exists = source.is_file()
+        mix_ready = source_exists and listen_mix_path(source).is_file()
         return render(
             request,
             "meeting.html",
@@ -218,7 +222,45 @@ def create_app() -> FastAPI:
             groups=groups,
             pending=pending,
             source_exists=source_exists,
+            mix_ready=mix_ready,
             md_path=getattr(result, "md_path", None),
+        )
+
+    @app.get("/meetings/{meeting_id}/audio")
+    def meeting_audio(
+        meeting_id: int,
+        force: Annotated[bool, Query()] = False,
+    ) -> FileResponse:
+        """Serve o mix mic+desktop (gera .listen.m4a sob demanda se faltar)."""
+        from ..audio import ensure_listen_mix, listen_mix_path
+
+        _, store = _settings_store()
+        result = store.get_meeting(meeting_id)
+        if result is None:
+            raise HTTPException(404, "Reunião não encontrada")
+        source = Path(result.source)
+        if not source.is_file():
+            raise HTTPException(404, "Arquivo fonte não encontrado no disco")
+
+        # Preferir cache em data_dir se a pasta da fonte não for gravável
+        preferred = listen_mix_path(source)
+        try:
+            mix = ensure_listen_mix(source, force=force, output_path=preferred)
+        except Exception:
+            settings, _ = _settings_store()
+            fallback = settings.data_dir / "listen" / f"{meeting_id}.m4a"
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                mix = ensure_listen_mix(source, force=force, output_path=fallback)
+            except Exception as exc:
+                raise HTTPException(500, f"Falha ao gerar mix: {exc}") from exc
+
+        return FileResponse(
+            mix,
+            media_type="audio/mp4",
+            filename=mix.name,
+            content_disposition_type="inline",  # <audio> embutido, não download
+            headers={"Cache-Control": "private, max-age=3600"},
         )
 
     @app.post("/meetings/{meeting_id}/assign")

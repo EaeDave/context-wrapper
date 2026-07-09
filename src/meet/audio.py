@@ -123,6 +123,40 @@ def prepare(
     )
 
 
+def listen_mix_path(input_path: Path) -> Path:
+    """Path padrão do mix de ouvir ao lado da gravação."""
+    return input_path.with_name(f"{input_path.stem}.listen.m4a")
+
+
+def ensure_listen_mix(
+    input_path: Path,
+    *,
+    force: bool = False,
+    mic_track: int = 1,
+    others_track: int = 2,
+    output_path: Path | None = None,
+) -> Path:
+    """Retorna o .listen.m4a, gerando se ainda não existir (ou se force=True).
+
+    Reusa o cache se for mais novo que a gravação-fonte.
+    """
+    input_path = Path(input_path)
+    out = Path(output_path) if output_path else listen_mix_path(input_path)
+    if (
+        not force
+        and out.is_file()
+        and out.stat().st_size > 0
+        and out.stat().st_mtime >= input_path.stat().st_mtime
+    ):
+        return out
+    return export_listen_mix(
+        input_path,
+        out,
+        mic_track=mic_track,
+        others_track=others_track,
+    )
+
+
 def export_listen_mix(
     input_path: Path,
     output_path: Path | None = None,
@@ -137,9 +171,7 @@ def export_listen_mix(
     """
     n_streams = probe_audio_streams(input_path)
     if output_path is None:
-        output_path = input_path.with_suffix("").with_name(
-            f"{input_path.stem}.listen.m4a"
-        )
+        output_path = listen_mix_path(input_path)
     output_path = Path(output_path)
 
     if n_streams < 2:
