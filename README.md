@@ -1,0 +1,107 @@
+# context-wrapper
+
+Transforma gravações de reunião em notas acionáveis: transcreve (Whisper na GPU),
+identifica quem falou o quê (pyannote + banco de vozes) e extrai action items
+estruturados via LLM — tudo local, exceto a chamada opcional ao LLM.
+
+```
+gravação (OBS) ──> wav 16k ──> transcrição + diarização ──> LLM ──> markdown + busca
+```
+
+## Requisitos
+
+- Linux com GPU NVIDIA (testado: RTX 3060 12GB), `ffmpeg` no PATH
+- [uv](https://docs.astral.sh/uv/)
+- Token Hugging Face (diarização); Claude Code instalado OU uma API key de LLM (extração)
+
+## Setup
+
+```sh
+uv sync
+```
+
+### 1. Token Hugging Face (diarização)
+
+1. Crie um token em <https://hf.co/settings/tokens>
+2. Aceite os termos em <https://hf.co/pyannote/speaker-diarization-community-1>
+3. `export HF_TOKEN=hf_...`
+
+### 2. LLM (extração de action items)
+
+Default é `claude-code`: usa o CLI do Claude Code já instalado (`claude -p`),
+consumindo sua **assinatura** (Pro/Max) — sem API key, sem custo extra.
+Divide o rate limit com seu uso normal do Claude Code.
+
+Alternativas via `~/.config/meet/config.toml`:
+
+```toml
+llm_provider = "anthropic"  # API oficial ($; exige ANTHROPIC_API_KEY)
+# llm_provider = "openai"   # exige OPENAI_API_KEY
+# llm_provider = "ollama"   # 100% local, ex.: llm_model = "qwen3:14b"
+llm_model = ""              # vazio = default do provider
+```
+
+### 3. OBS multi-track (recomendado)
+
+Gravar sua voz numa track separada corta a maior parte do trabalho de diarização —
+sua fala já entra identificada como `me`.
+
+1. Settings → Output → Recording → Audio Track: marque **1 e 2**
+2. Edit → Advanced Audio Properties:
+   - **Mic/Aux** → somente track **1**
+   - **Desktop Audio** → somente track **2**
+3. Settings → Output → Recording Format: **Matroska (mkv)**.
+   **Nunca mp4**: mp4 no OBS mantém só a track 1 — o áudio dos outros
+   participantes (track 2) é descartado silenciosamente.
+
+Gravações com uma track só também funcionam (diarização cobre todos os falantes).
+
+## Uso
+
+```sh
+uv run meet process reuniao.mkv            # pipeline completo
+uv run meet process reuniao.mkv --no-llm   # só transcript diarizado
+```
+
+Saída: `~/reunioes/YYYY-MM-DD-titulo.md` com resumo, tabela de action items
+(o quê / onde / detalhes técnicos / quem pediu / prioridade) e transcript completo.
+
+### Banco de vozes
+
+Na primeira reunião os falantes saem como `SPEAKER_00`, `SPEAKER_01`...
+Nomeie uma vez:
+
+```sh
+uv run meet speakers assign 1 SPEAKER_00 "Chefe"
+```
+
+Nas próximas reuniões a voz é reconhecida automaticamente (similaridade de
+embedding, limiar configurável via `similarity_threshold`).
+
+```sh
+uv run meet speakers list          # vozes conhecidas
+uv run meet speakers rename A B    # renomear
+```
+
+### Histórico
+
+```sh
+uv run meet list                   # reuniões processadas
+uv run meet search "tela de login" # busca full-text (FTS5) em falas e action items
+```
+
+## Configuração
+
+Env vars (`HF_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MEET_LLM_PROVIDER`,
+`MEET_LLM_MODEL`, `MEET_OLLAMA_URL`) têm precedência sobre
+`~/.config/meet/config.toml`. Campos disponíveis: ver `src/meet/config.py`
+(`whisper_model`, `language`, `device`, `similarity_threshold`, `output_dir`...).
+
+## Notas técnicas
+
+- Whisper `large-v3-turbo` int8 e pyannote rodam sequencialmente e liberam VRAM
+  entre etapas — cabe folgado em 12GB.
+- torch é fixado no index cu128 para alinhar com o runtime CUDA 12 exigido pelo
+  ctranslate2 (faster-whisper); não troque para cu13x sem revalidar.
+- Dados: `~/.local/share/meet/meet.db` (SQLite + FTS5), embeddings pendentes em
+  `~/.local/share/meet/pending/`.

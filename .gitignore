@@ -1,0 +1,15 @@
+# Ambiente
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Gravações / áudio — NUNCA commitar (conteúdo privado de reuniões)
+*.mp4
+*.mkv
+*.wav
+*.ogg
+*.m4a
+
+# Segredos locais
+.env

@@ -1,0 +1,123 @@
+"""Extração e preparação de áudio a partir de vídeos de reunião."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+from .models import AudioTracks
+
+_WAV_OPTS = ["-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le"]
+# Nivelamento de fala: vozes gravadas baixas (mic com pouco ganho, participante
+# remoto quieto) escapam do VAD do whisper; speechnorm levanta até 12.5x.
+_SPEECHNORM = "speechnorm=e=12.5:r=0.0001:l=1"
+
+
+def probe_audio_streams(input_path: Path) -> int:
+    """Retorna o número de streams de áudio no arquivo via ffprobe."""
+    cmd = [
+        "ffprobe", "-v", "quiet",
+        "-print_format", "json",
+        "-show_streams",
+        "-select_streams", "a",
+        str(input_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffprobe falhou ao listar streams: {proc.stderr[:500]}")
+    data = json.loads(proc.stdout)
+    return len(data.get("streams", []))
+
+
+def _probe_duration(input_path: Path) -> float:
+    """Retorna duração em segundos do container via ffprobe."""
+    cmd = [
+        "ffprobe", "-v", "quiet",
+        "-print_format", "json",
+        "-show_format",
+        str(input_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffprobe falhou ao ler duração: {proc.stderr[:500]}")
+    data = json.loads(proc.stdout)
+    return float(data["format"]["duration"])
+
+
+def _run_ffmpeg(args: list[str]) -> None:
+    """Executa ffmpeg com -y; RuntimeError com stderr resumido se falhar."""
+    proc = subprocess.run(["ffmpeg", "-y"] + args, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg falhou: {proc.stderr[-500:]}")
+
+
+def prepare(
+    input_path: Path,
+    workdir: Path,
+    mic_track: int = 1,
+    others_track: int = 2,
+) -> AudioTracks:
+    """Extrai streams de áudio para wav 16 kHz mono pcm_s16le.
+
+    1 stream → mic=None, others==mixed (mesmo arquivo wav).
+    ≥2 streams → mic e others separados (1-based) + mixdown completo via amix.
+    """
+    workdir.mkdir(parents=True, exist_ok=True)
+    n_streams = probe_audio_streams(input_path)
+    duration = _probe_duration(input_path)
+
+    if n_streams < 2:
+        mixed = workdir / "mixed.wav"
+        _run_ffmpeg([
+            "-i", str(input_path),
+            "-map", "0:a:0",
+            "-af", _SPEECHNORM,
+            *_WAV_OPTS,
+            str(mixed),
+        ])
+        return AudioTracks(mic=None, others=mixed, mixed=mixed, duration=duration)
+
+    mic_idx = mic_track - 1
+    others_idx = others_track - 1
+
+    mic_path = workdir / "mic.wav"
+    others_path = workdir / "others.wav"
+    mixed_path = workdir / "mixed.wav"
+
+    _run_ffmpeg([
+        "-i", str(input_path),
+        "-map", f"0:a:{mic_idx}",
+        "-af", _SPEECHNORM,
+        *_WAV_OPTS,
+        str(mic_path),
+    ])
+
+    _run_ffmpeg([
+        "-i", str(input_path),
+        "-map", f"0:a:{others_idx}",
+        "-af", _SPEECHNORM,
+        *_WAV_OPTS,
+        str(others_path),
+    ])
+
+    # Mixdown de todos os K streams via amix; nomeia saída para mapeamento explícito
+    stream_refs = "".join(f"[0:a:{i}]" for i in range(n_streams))
+    filter_str = (
+        f"{stream_refs}amix=inputs={n_streams}:duration=longest[mx];"
+        f"[mx]{_SPEECHNORM}[amixed]"
+    )
+    _run_ffmpeg([
+        "-i", str(input_path),
+        "-filter_complex", filter_str,
+        "-map", "[amixed]",
+        *_WAV_OPTS,
+        str(mixed_path),
+    ])
+
+    return AudioTracks(
+        mic=mic_path,
+        others=others_path,
+        mixed=mixed_path,
+        duration=duration,
+    )
