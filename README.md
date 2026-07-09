@@ -56,6 +56,40 @@ sua fala já entra identificada como `me`.
 
 Gravações com uma track só também funcionam (diarização cobre todos os falantes).
 
+### Desktop Audio “baixo” (Discord / track 2)
+
+Na prática o OBS **não está atenuando** o desktop: ele grava o monitor digital
+do sink default (`pulse_output_capture` → `device_id=default`) com volume 1.0.
+Medições típicas de call Discord nessas tracks:
+
+| Fonte | Peak típico | O que significa |
+|-------|-------------|-----------------|
+| Track 2 (desktop) | ~−10 dBFS | normal para VoIP; tem ~10 dB de headroom |
+| Track 1 (mic) | ~−17 dBFS | frequentemente **mais baixa** que o desktop |
+| Monitor PipeWire (teste com tom) | igual à fonte (±1–2 dB) | path digital sem perda |
+
+Se a voz dos outros **parece** baixa, as causas reais (em ordem) são:
+
+1. **Player só toca a track 1** — num mkv multi-track o default é o mic.
+   Ouça a track do Discord com:
+   ```sh
+   mpv --aid=2 reuniao.mkv
+   ```
+2. **Volume por-usuário no Discord** — clique direito no participante → slider
+   Volume (isso muda o que o OBS captura).
+3. **Volume do app no PipeWire** — com a call tocando, `pavucontrol` → Playback
+   → stream do Discord em 100% (OBS captura **pós** volume de app).
+4. **Headset alto no hardware, sinal digital quieto** — no fone a call soa forte
+   porque o amp do H510 está no talo; o arquivo grava o nível digital (bem mais
+   baixo). Não é bug do OBS.
+
+Ajustes se quiser a gravação mais “cheia” (opcional — o pipeline já aplica
+`speechnorm` e usa Whisper `large-v3`, que aguentam SNR ruim):
+
+- OBS → Desktop Audio → Filters → **Gain** +6 a +12 dB (peaks em −10 dB
+  aguentam +9 dB sem clipar).
+- Subir o slider do amigo no Discord **antes** de gravar.
+
 ## Uso
 
 ```sh
