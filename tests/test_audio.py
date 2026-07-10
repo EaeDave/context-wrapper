@@ -18,7 +18,16 @@ from pathlib import Path
 
 import pytest
 
-from meet.audio import ensure_listen_mix, export_listen_mix, listen_mix_path, prepare
+from meet.audio import (
+    ensure_listen_mix,
+    ensure_listen_preview,
+    export_listen_mix,
+    export_listen_preview,
+    listen_mix_path,
+    listen_preview_path,
+    prepare,
+    probe_video_streams,
+)
 
 FFMPEG_MISSING = shutil.which("ffmpeg") is None
 pytestmark = pytest.mark.skipif(FFMPEG_MISSING, reason="ffmpeg not installed")
@@ -235,3 +244,60 @@ def test_ensure_listen_mix_caches(tmp_path: Path) -> None:
     forced = ensure_listen_mix(src, force=True)
     assert forced == first
     assert forced.stat().st_size > 0
+
+
+def _make_video_two_audio_mkv(path: Path, duration: float = 1.0) -> None:
+    """MKV com 1 vídeo H.264 + 2 áudios (simula OBS dual-track)."""
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", f"color=c=blue:s=320x240:d={duration}:r=15",
+            "-f", "lavfi", "-i", f"sine=frequency=440:duration={duration}",
+            "-f", "lavfi", "-i", f"sine=frequency=880:duration={duration}",
+            "-map", "0:v",
+            "-map", "1:a",
+            "-map", "2:a",
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_export_listen_preview_has_video_and_one_audio(tmp_path: Path) -> None:
+    src = tmp_path / "obs.mkv"
+    _make_video_two_audio_mkv(src)
+    assert probe_video_streams(src) == 1
+
+    out = export_listen_preview(src)
+    assert out == tmp_path / "obs.listen.mp4"
+    assert out.exists()
+    assert probe_video_streams(out) == 1
+    from meet.audio import probe_audio_streams
+
+    assert probe_audio_streams(out) == 1
+
+
+def test_ensure_listen_preview_caches(tmp_path: Path) -> None:
+    src = tmp_path / "obs.mkv"
+    _make_video_two_audio_mkv(src)
+    first = ensure_listen_preview(src)
+    mtime = first.stat().st_mtime
+    second = ensure_listen_preview(src)
+    assert second == first
+    assert second.stat().st_mtime == mtime
+
+
+def test_ensure_listen_preview_audio_only_falls_back(tmp_path: Path) -> None:
+    src = tmp_path / "audio-only.mkv"
+    _make_two_stream_mkv(src)
+    out = ensure_listen_preview(src)
+    assert out.suffix == ".m4a"
+    assert out.exists()
+
+
+def test_listen_preview_path_naming(tmp_path: Path) -> None:
+    assert listen_preview_path(tmp_path / "x.mkv") == tmp_path / "x.listen.mp4"

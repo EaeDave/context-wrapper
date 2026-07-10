@@ -124,8 +124,37 @@ def prepare(
 
 
 def listen_mix_path(input_path: Path) -> Path:
-    """Path padrão do mix de ouvir ao lado da gravação."""
+    """Path padrão do mix de áudio ao lado da gravação."""
     return input_path.with_name(f"{input_path.stem}.listen.m4a")
+
+
+def listen_preview_path(input_path: Path) -> Path:
+    """Path padrão do preview (vídeo + áudio misturado) ao lado da gravação."""
+    return input_path.with_name(f"{input_path.stem}.listen.mp4")
+
+
+def probe_video_streams(input_path: Path) -> int:
+    """Retorna o número de streams de vídeo no arquivo via ffprobe."""
+    cmd = [
+        "ffprobe", "-v", "quiet",
+        "-print_format", "json",
+        "-show_streams",
+        "-select_streams", "v",
+        str(input_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffprobe falhou ao listar vídeo: {proc.stderr[:500]}")
+    data = json.loads(proc.stdout)
+    return len(data.get("streams", []))
+
+
+def _cache_is_fresh(out: Path, source: Path) -> bool:
+    return (
+        out.is_file()
+        and out.stat().st_size > 0
+        and out.stat().st_mtime >= source.stat().st_mtime
+    )
 
 
 def ensure_listen_mix(
@@ -142,12 +171,7 @@ def ensure_listen_mix(
     """
     input_path = Path(input_path)
     out = Path(output_path) if output_path else listen_mix_path(input_path)
-    if (
-        not force
-        and out.is_file()
-        and out.stat().st_size > 0
-        and out.stat().st_mtime >= input_path.stat().st_mtime
-    ):
+    if not force and _cache_is_fresh(out, input_path):
         return out
     return export_listen_mix(
         input_path,
@@ -155,6 +179,90 @@ def ensure_listen_mix(
         mic_track=mic_track,
         others_track=others_track,
     )
+
+
+def ensure_listen_preview(
+    input_path: Path,
+    *,
+    force: bool = False,
+    mic_track: int = 1,
+    others_track: int = 2,
+    output_path: Path | None = None,
+) -> Path:
+    """Retorna o .listen.mp4 (vídeo + tracks misturadas), gerando se faltar.
+
+    Sem stream de vídeo no arquivo-fonte, cai no mix só de áudio (.listen.m4a).
+    """
+    input_path = Path(input_path)
+    if probe_video_streams(input_path) < 1:
+        return ensure_listen_mix(
+            input_path,
+            force=force,
+            mic_track=mic_track,
+            others_track=others_track,
+        )
+    out = Path(output_path) if output_path else listen_preview_path(input_path)
+    if not force and _cache_is_fresh(out, input_path):
+        return out
+    return export_listen_preview(
+        input_path,
+        out,
+        mic_track=mic_track,
+        others_track=others_track,
+    )
+
+
+def export_listen_preview(
+    input_path: Path,
+    output_path: Path | None = None,
+    *,
+    mic_track: int = 1,
+    others_track: int = 2,
+) -> Path:
+    """Gera mp4 com vídeo (copy) + áudio mic/desktop misturados.
+
+    Browser-friendly: H.264 copy + AAC, ``faststart`` pra seek no player.
+    """
+    n_audio = probe_audio_streams(input_path)
+    if probe_video_streams(input_path) < 1:
+        raise RuntimeError("Arquivo sem stream de vídeo — use export_listen_mix")
+
+    if output_path is None:
+        output_path = listen_preview_path(input_path)
+    output_path = Path(output_path)
+
+    common_out = [
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+
+    if n_audio < 2:
+        _run_ffmpeg([
+            "-i", str(input_path),
+            "-map", "0:v:0",
+            "-map", "0:a:0",
+            *common_out,
+        ])
+        return output_path
+
+    mic_idx = mic_track - 1
+    others_idx = others_track - 1
+    filter_str = (
+        f"[0:a:{mic_idx}][0:a:{others_idx}]"
+        f"amix=inputs=2:duration=longest:normalize=0,"
+        f"alimiter=limit=0.95[a]"
+    )
+    _run_ffmpeg([
+        "-i", str(input_path),
+        "-filter_complex", filter_str,
+        "-map", "0:v:0",
+        "-map", "[a]",
+        *common_out,
+    ])
+    return output_path
 
 
 def export_listen_mix(

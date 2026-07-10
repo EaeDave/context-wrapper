@@ -14,9 +14,12 @@
   <div class="actions" style="margin-top:0">
     {% if source_exists %}
       <a class="btn btn-ghost" href="/files?path={{ m.source | urlencode }}">Baixar fonte</a>
-      <a class="btn btn-ghost" href="/meetings/{{ meeting_id }}/audio">Baixar mix</a>
+      {% if has_video %}
+        <a class="btn btn-ghost" href="/meetings/{{ meeting_id }}/preview">Baixar preview</a>
+      {% endif %}
+      <a class="btn btn-ghost" href="/meetings/{{ meeting_id }}/audio">Só áudio</a>
       <form method="post" action="/meetings/{{ meeting_id }}/mix" style="display:inline">
-        <button class="btn btn-ghost" type="submit" title="Regenera o .listen.m4a em background">Remixar</button>
+        <button class="btn btn-ghost" type="submit" title="Regenera preview/mix em background">Remixar</button>
       </form>
     {% endif %}
     {% if md_path %}
@@ -26,24 +29,43 @@
   </div>
 
   {% if source_exists %}
-    <h2>Ouvir</h2>
+    <h2>Reproduzir</h2>
     <div class="card player-card">
       <p class="player-label">
-        Mic + desktop misturados
-        {% if not mix_ready %}
-          <span class="player-hint">· primeira vez gera o mix (alguns segundos)</span>
+        {% if has_video %}
+          Vídeo + mic e desktop misturados
+          {% if not preview_ready %}
+            <span class="player-hint">· primeira vez monta o preview (vídeo copy, rápido)</span>
+          {% endif %}
+        {% else %}
+          Só áudio (arquivo sem vídeo)
+          {% if not mix_ready %}
+            <span class="player-hint">· primeira vez gera o mix</span>
+          {% endif %}
         {% endif %}
       </p>
-      <audio
-        class="player"
-        controls
-        preload="metadata"
-        src="/meetings/{{ meeting_id }}/audio"
-        controlsList="nodownload"
-      >
-        Seu browser não toca áudio embutido —
-        <a href="/meetings/{{ meeting_id }}/audio">baixe o mix</a>.
-      </audio>
+      {% if has_video %}
+        <video
+          class="player video-player"
+          controls
+          preload="metadata"
+          playsinline
+          src="/meetings/{{ meeting_id }}/preview"
+        >
+          Seu browser não toca o vídeo —
+          <a href="/meetings/{{ meeting_id }}/preview">baixe o preview</a>.
+        </video>
+      {% else %}
+        <audio
+          class="player"
+          controls
+          preload="metadata"
+          src="/meetings/{{ meeting_id }}/audio"
+        >
+          Seu browser não toca áudio —
+          <a href="/meetings/{{ meeting_id }}/audio">baixe o mix</a>.
+        </audio>
+      {% endif %}
     </div>
   {% endif %}
 

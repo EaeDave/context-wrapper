@@ -201,9 +201,85 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Job não encontrado")
         return render(request, "partials/job_status.html", job=job)
 
+    def _resolve_source(meeting_id: int) -> tuple[object, Path]:
+        _, store = _settings_store()
+        result = store.get_meeting(meeting_id)
+        if result is None:
+            raise HTTPException(404, "Reunião não encontrada")
+        source = Path(result.source)
+        if not source.is_file():
+            raise HTTPException(404, "Arquivo fonte não encontrado no disco")
+        return result, source
+
+    def _serve_listen_file(
+        meeting_id: int,
+        *,
+        kind: str,
+        force: bool,
+    ) -> FileResponse:
+        """Gera (se preciso) e serve preview de vídeo ou mix de áudio."""
+        from ..audio import (
+            ensure_listen_mix,
+            ensure_listen_preview,
+            listen_mix_path,
+            listen_preview_path,
+            probe_video_streams,
+        )
+
+        _, source = _resolve_source(meeting_id)
+        settings, _ = _settings_store()
+        listen_dir = settings.data_dir / "listen"
+        listen_dir.mkdir(parents=True, exist_ok=True)
+
+        if kind == "preview":
+            has_video = probe_video_streams(source) >= 1
+            if not has_video:
+                # Áudio puro — endpoint de preview cai no mix
+                kind = "audio"
+            else:
+                preferred = listen_preview_path(source)
+                fallback = listen_dir / f"{meeting_id}.listen.mp4"
+                try:
+                    path = ensure_listen_preview(
+                        source, force=force, output_path=preferred
+                    )
+                except Exception:
+                    try:
+                        path = ensure_listen_preview(
+                            source, force=force, output_path=fallback
+                        )
+                    except Exception as exc:
+                        raise HTTPException(
+                            500, f"Falha ao gerar preview: {exc}"
+                        ) from exc
+                return FileResponse(
+                    path,
+                    media_type="video/mp4",
+                    filename=path.name,
+                    content_disposition_type="inline",
+                    headers={"Cache-Control": "private, max-age=3600"},
+                )
+
+        preferred = listen_mix_path(source)
+        fallback = listen_dir / f"{meeting_id}.listen.m4a"
+        try:
+            path = ensure_listen_mix(source, force=force, output_path=preferred)
+        except Exception:
+            try:
+                path = ensure_listen_mix(source, force=force, output_path=fallback)
+            except Exception as exc:
+                raise HTTPException(500, f"Falha ao gerar mix: {exc}") from exc
+        return FileResponse(
+            path,
+            media_type="audio/mp4",
+            filename=path.name,
+            content_disposition_type="inline",
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
+
     @app.get("/meetings/{meeting_id}", response_class=HTMLResponse)
     def meeting_detail(request: Request, meeting_id: int) -> HTMLResponse:
-        from ..audio import listen_mix_path
+        from ..audio import listen_mix_path, listen_preview_path, probe_video_streams
 
         settings, store = _settings_store()
         result = store.get_meeting(meeting_id)
@@ -213,7 +289,16 @@ def create_app() -> FastAPI:
         pending = _pending_labels(settings, meeting_id)
         source = Path(result.source)
         source_exists = source.is_file()
-        mix_ready = source_exists and listen_mix_path(source).is_file()
+        has_video = False
+        preview_ready = False
+        mix_ready = False
+        if source_exists:
+            try:
+                has_video = probe_video_streams(source) >= 1
+            except Exception:
+                has_video = False
+            preview_ready = has_video and listen_preview_path(source).is_file()
+            mix_ready = listen_mix_path(source).is_file()
         return render(
             request,
             "meeting.html",
@@ -222,46 +307,27 @@ def create_app() -> FastAPI:
             groups=groups,
             pending=pending,
             source_exists=source_exists,
+            has_video=has_video,
+            preview_ready=preview_ready,
             mix_ready=mix_ready,
             md_path=getattr(result, "md_path", None),
         )
+
+    @app.get("/meetings/{meeting_id}/preview")
+    def meeting_preview(
+        meeting_id: int,
+        force: Annotated[bool, Query()] = False,
+    ) -> FileResponse:
+        """Vídeo + mic/desktop misturados (mp4). Sem vídeo, devolve só áudio."""
+        return _serve_listen_file(meeting_id, kind="preview", force=force)
 
     @app.get("/meetings/{meeting_id}/audio")
     def meeting_audio(
         meeting_id: int,
         force: Annotated[bool, Query()] = False,
     ) -> FileResponse:
-        """Serve o mix mic+desktop (gera .listen.m4a sob demanda se faltar)."""
-        from ..audio import ensure_listen_mix, listen_mix_path
-
-        _, store = _settings_store()
-        result = store.get_meeting(meeting_id)
-        if result is None:
-            raise HTTPException(404, "Reunião não encontrada")
-        source = Path(result.source)
-        if not source.is_file():
-            raise HTTPException(404, "Arquivo fonte não encontrado no disco")
-
-        # Preferir cache em data_dir se a pasta da fonte não for gravável
-        preferred = listen_mix_path(source)
-        try:
-            mix = ensure_listen_mix(source, force=force, output_path=preferred)
-        except Exception:
-            settings, _ = _settings_store()
-            fallback = settings.data_dir / "listen" / f"{meeting_id}.m4a"
-            fallback.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                mix = ensure_listen_mix(source, force=force, output_path=fallback)
-            except Exception as exc:
-                raise HTTPException(500, f"Falha ao gerar mix: {exc}") from exc
-
-        return FileResponse(
-            mix,
-            media_type="audio/mp4",
-            filename=mix.name,
-            content_disposition_type="inline",  # <audio> embutido, não download
-            headers={"Cache-Control": "private, max-age=3600"},
-        )
+        """Só o mix de áudio mic+desktop (.listen.m4a)."""
+        return _serve_listen_file(meeting_id, kind="audio", force=force)
 
     @app.post("/meetings/{meeting_id}/assign")
     def assign_speaker(
