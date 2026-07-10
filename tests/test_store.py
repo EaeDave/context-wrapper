@@ -390,3 +390,16 @@ def test_adopt_media_and_delete(tmp_store: Store, tmp_path: Path) -> None:
 
 def test_delete_missing_returns_false(tmp_store: Store, tmp_path: Path) -> None:
     assert tmp_store.delete_meeting(99999, data_dir=tmp_path) is False
+
+
+def test_delete_meetings_bulk(tmp_store: Store, tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    a = tmp_store.save_meeting(_meeting(title="A"), Path("/tmp/a.md"))
+    b = tmp_store.save_meeting(_meeting(title="B"), Path("/tmp/b.md"))
+    c = tmp_store.save_meeting(_meeting(title="C"), Path("/tmp/c.md"))
+    n = tmp_store.delete_meetings([a, b, 99999], data_dir=data_dir)
+    assert n == 2
+    assert tmp_store.get_meeting(a) is None
+    assert tmp_store.get_meeting(b) is None
+    assert tmp_store.get_meeting(c) is not None

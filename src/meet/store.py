@@ -378,6 +378,22 @@ class Store:
 
         return True
 
+    def delete_meetings(
+        self,
+        meeting_ids: list[int],
+        *,
+        data_dir: Path,
+        delete_markdown: bool = True,
+    ) -> int:
+        """Apaga várias reuniões; retorna quantas existiam e foram removidas."""
+        n = 0
+        for mid in meeting_ids:
+            if self.delete_meeting(
+                mid, data_dir=data_dir, delete_markdown=delete_markdown
+            ):
+                n += 1
+        return n
+
     def update_speaker(self, meeting_id: int, old: str, new: str) -> None:
         """Renomeia falante em segments e reindexa FTS da reunião."""
         with self._conn:

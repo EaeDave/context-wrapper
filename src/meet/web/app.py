@@ -387,6 +387,19 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Reunião não encontrada")
         return RedirectResponse("/", status_code=303)
 
+    @app.post("/meetings/bulk-delete")
+    def bulk_delete_meetings(
+        ids: Annotated[list[int], Form()] = [],
+    ) -> RedirectResponse:
+        """Exclui reuniões selecionadas na lista (checkboxes ``ids``)."""
+        settings, store = _settings_store()
+        # dedupe + só positivos
+        clean = sorted({int(i) for i in ids if int(i) > 0})
+        if not clean:
+            raise HTTPException(400, "Nenhuma reunião selecionada")
+        store.delete_meetings(clean, data_dir=settings.data_dir)
+        return RedirectResponse("/", status_code=303)
+
     @app.post("/meetings/{meeting_id}/relink")
     def relink_meeting(
         meeting_id: int,
