@@ -6,7 +6,7 @@ import gc
 from pathlib import Path
 
 from .config import Settings
-from .models import TranscriptSegment
+from .models import TranscriptSegment, Word
 
 
 def _preload_cuda12_libs() -> None:
@@ -67,6 +67,7 @@ def transcribe(wav: Path, settings: Settings) -> list[TranscriptSegment]:
             str(wav),
             language=settings.language,
             vad_filter=True,
+            word_timestamps=True,
         )
         result = [
             TranscriptSegment(
@@ -74,6 +75,7 @@ def transcribe(wav: Path, settings: Settings) -> list[TranscriptSegment]:
                 end=seg.end,
                 text=seg.text.strip(),
                 speaker=None,
+                words=[Word(w.start, w.end, w.word) for w in (seg.words or [])] or None,
             )
             for seg in segments_iter
         ]

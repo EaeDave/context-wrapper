@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 from meet.merge import assign_speakers, combine, rename_speakers
-from meet.models import ME, SpeakerTurn, TranscriptSegment
+from meet.models import ME, SpeakerTurn, TranscriptSegment, Word
 
 
 # ---------------------------------------------------------------------------
@@ -29,6 +29,13 @@ def seg(start: float, end: float, text: str = "x", speaker: str | None = None) -
 
 def turn(start: float, end: float, label: str) -> SpeakerTurn:
     return SpeakerTurn(start=start, end=end, label=label)
+
+def wseg(start: float, end: float, words: list[tuple[float, float, str]]) -> TranscriptSegment:
+    """Segmento com word timestamps (texto = junção das palavras)."""
+    ws = [Word(s, e, t) for s, e, t in words]
+    return TranscriptSegment(
+        start=start, end=end, text="".join(w.text for w in ws).strip(), words=ws
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +106,58 @@ def test_assign_result_length_matches_input() -> None:
     turns_list = [turn(0, 3, "A"), turn(3, 6, "B")]
     result = assign_speakers(segs, turns_list)
     assert len(result) == len(segs)
+
+# ---------------------------------------------------------------------------
+# assign_speakers — word-level splitting
+# ---------------------------------------------------------------------------
+
+def test_assign_words_splits_segment_across_speakers() -> None:
+    """Segmento cruzando dois falantes vira dois sub-segmentos (bug reunião 26)."""
+    s = wseg(0, 4, [(0, 1, " a"), (1, 2, " b"), (2, 3, " c"), (3, 4, " d")])
+    turns = [turn(0, 2, "SPEAKER_00"), turn(2, 4, "SPEAKER_01")]
+    result = assign_speakers([s], turns)
+    assert [r.speaker for r in result] == ["SPEAKER_00", "SPEAKER_01"]
+    assert result[0].text == "a b"
+    assert result[1].text == "c d"
+
+
+def test_assign_words_groups_consecutive_same_speaker() -> None:
+    """Palavras consecutivas do mesmo falante ficam num único sub-segmento."""
+    s = wseg(0, 4, [(0, 1, " a"), (1, 2, " b"), (2, 3, " c"), (3, 4, " d")])
+    turns = [turn(0, 4, "SPEAKER_00")]
+    result = assign_speakers([s], turns)
+    assert len(result) == 1
+    assert result[0].speaker == "SPEAKER_00"
+    assert result[0].start == 0 and result[0].end == 4
+
+
+def test_assign_words_alternating_recovers_both_speakers() -> None:
+    """Falantes alternando palavra a palavra: ambos aparecem, sem colapso."""
+    s = wseg(0, 4, [(0, 1, " a"), (1, 2, " b"), (2, 3, " c"), (3, 4, " d")])
+    turns = [
+        turn(0, 1, "SPEAKER_00"),
+        turn(1, 2, "SPEAKER_01"),
+        turn(2, 3, "SPEAKER_00"),
+        turn(3, 4, "SPEAKER_01"),
+    ]
+    result = assign_speakers([s], turns)
+    assert {r.speaker for r in result} == {"SPEAKER_00", "SPEAKER_01"}
+    assert len(result) == 4
+
+
+def test_assign_words_does_not_mutate_input() -> None:
+    """Split não altera o segmento original nem suas words."""
+    s = wseg(0, 2, [(0, 1, " a"), (1, 2, " b")])
+    assign_speakers([s], [turn(0, 1, "A"), turn(1, 2, "B")])
+    assert s.speaker is None
+    assert s.words is not None and len(s.words) == 2
+
+
+def test_assign_words_empty_turns_unchanged() -> None:
+    """Com words mas sem turns: contrato de não-mutação (speaker fica None)."""
+    s = wseg(0, 2, [(0, 1, " a"), (1, 2, " b")])
+    result = assign_speakers([s], [])
+    assert result[0].speaker is None
 
 
 # ---------------------------------------------------------------------------

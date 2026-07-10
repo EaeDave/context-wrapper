@@ -10,6 +10,15 @@ ME = "me"
 
 
 @dataclass
+class Word:
+    """Palavra com timestamps (faster-whisper word_timestamps)."""
+
+    start: float
+    end: float
+    text: str
+
+
+@dataclass
 class TranscriptSegment:
     """Um trecho de fala transcrito."""
 
@@ -18,6 +27,9 @@ class TranscriptSegment:
     text: str
     # None antes da diarização; depois "SPEAKER_00" ou nome resolvido ("Chefe", ME).
     speaker: str | None = None
+    # Palavras com timestamps (transiente: usado só p/ atribuir falante por palavra
+    # no merge; não é persistido no banco).
+    words: list[Word] | None = None
 
 
 @dataclass
