@@ -33,6 +33,7 @@ def run_pipeline(
     import_media: bool = True,
     today: str | None = None,
     on_progress: ProgressCb | None = None,
+    num_speakers: int = 0,
 ) -> tuple[int, MeetingResult, Path]:
     """Processa gravação de ponta a ponta.
 
@@ -63,6 +64,7 @@ def run_pipeline(
             workdir=workdir,
             today=today or date.today().isoformat(),
             progress=progress,
+            num_speakers=num_speakers,
         )
     finally:
         if not keep_wav:
@@ -81,6 +83,7 @@ def _analyse(
     today: str,
     progress: ProgressCb,
     title: str | None = None,
+    num_speakers: int = 0,
 ) -> tuple[MeetingResult, dict[str, Any], list[str]]:
     """Faz análise completa (audio→transcribe→diarize→merge→llm) sem salvar no banco.
 
@@ -118,7 +121,7 @@ def _analyse(
 
         progress("Diarizando falantes…")
         try:
-            turns, embeddings = diarize_mod.diarize(tracks.others, settings)
+            turns, embeddings = diarize_mod.diarize(tracks.others, settings, num_speakers=num_speakers)
         except Exception as exc:
             raise RuntimeError(f"Erro na diarização: {exc}") from exc
 
@@ -136,17 +139,23 @@ def _analyse(
 
         progress("Diarizando falantes…")
         try:
-            turns, embeddings = diarize_mod.diarize(tracks.mixed, settings)
+            turns, embeddings = diarize_mod.diarize(tracks.mixed, settings, num_speakers=num_speakers)
         except Exception as exc:
             raise RuntimeError(f"Erro na diarização: {exc}") from exc
 
         segments = merge_mod.assign_speakers(segments, turns)
 
     progress("Resolvendo falantes no banco de vozes…")
-    mapping = voicebank_mod.resolve(
+    mapping_with_scores = voicebank_mod.resolve_with_scores(
         embeddings, store, settings.similarity_threshold
     )
+    mapping = {label: name for label, (name, _) in mapping_with_scores.items()}
     unresolved = [label for label, name in mapping.items() if label == name]
+    speaker_matches = {
+        name: score
+        for label, (name, score) in mapping_with_scores.items()
+        if label != name
+    }
     segments = merge_mod.rename_speakers(segments, mapping)
     participants = sorted({s.speaker for s in segments if s.speaker})
 
@@ -175,6 +184,7 @@ def _analyse(
         summary=summary,
         action_items=action_items,
         segments=segments,
+        speaker_matches=speaker_matches,
     )
     return result, embeddings, unresolved
 
@@ -192,6 +202,7 @@ def _run(
     workdir: Path,
     today: str,
     progress: ProgressCb,
+    num_speakers: int = 0,
 ) -> tuple[int, MeetingResult, Path]:
     from . import render as render_mod
 
@@ -206,6 +217,7 @@ def _run(
         today=today,
         progress=progress,
         title=title,
+        num_speakers=num_speakers,
     )
 
     progress("Salvando markdown e banco…")
@@ -248,6 +260,7 @@ def reprocess_meeting(
     others_track: int = 2,
     no_llm: bool = False,
     on_progress: ProgressCb | None = None,
+    num_speakers: int = 0,
 ) -> MeetingResult:
     """Reprocessa reunião existente in-place (áudio completo → replace_meeting_content).
 
@@ -279,6 +292,7 @@ def reprocess_meeting(
             workdir=workdir,
             today=existing.date,
             progress=progress,
+            num_speakers=num_speakers,
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

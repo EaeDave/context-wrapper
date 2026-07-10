@@ -83,3 +83,5 @@ class MeetingResult:
     summary: str = ""
     action_items: list[ActionItem] = field(default_factory=list)
     segments: list[TranscriptSegment] = field(default_factory=list)
+    # nome_resolvido → score de cosseno; só entradas casadas (label≠nome)
+    speaker_matches: dict[str, float] = field(default_factory=dict)

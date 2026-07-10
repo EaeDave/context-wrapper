@@ -16,6 +16,7 @@ import {
   HardDrive,
   RefreshCcw,
   Wand2,
+  Fingerprint,
 } from "lucide-react"
 import type { MeetingDetail } from "@/lib/types"
 import * as api from "@/lib/api"
@@ -157,15 +158,26 @@ function MeetingHeader({ meeting, onRename, onDelete, onRemix, onReextract, onRe
           {meeting.participants.length > 0 && (
             <div className="flex flex-wrap items-center gap-1">
               <Users className="size-3 text-muted-foreground" />
-              {meeting.participants.map((p) => (
-                <Badge
-                  key={p}
-                  variant="outline"
-                  className={cn("text-xs", speakerBadgeClass(p))}
-                >
-                  {p}
-                </Badge>
-              ))}
+              {meeting.participants.map((p) => {
+                const sim = meeting.speaker_matches[p]
+                return (
+                  <Badge
+                    key={p}
+                    variant="outline"
+                    className={cn("text-xs gap-1", speakerBadgeClass(p))}
+                  >
+                    {p}
+                    {sim != null && (
+                      <span
+                        title={`reconhecido por voz — similaridade ${sim.toFixed(2)}`}
+                        className="inline-flex"
+                      >
+                        <Fingerprint className="size-3 opacity-60" />
+                      </span>
+                    )}
+                  </Badge>
+                )
+              })}
             </div>
           )}
         </div>
@@ -283,6 +295,7 @@ export default function MeetingDetailPage() {
   const [reprocessOpen, setReprocessOpen] = useState(false)
   const [micTrack, setMicTrack] = useState(1)
   const [othersTrack, setOthersTrack] = useState(2)
+  const [numSpeakers, setNumSpeakers] = useState(0)
   const [noLlm, setNoLlm] = useState(false)
 
   const { data: meeting, isLoading, error } = useQuery<MeetingDetail>({
@@ -342,6 +355,7 @@ export default function MeetingDetailPage() {
         mic_track: micTrack,
         others_track: othersTrack,
         no_llm: noLlm,
+        num_speakers: numSpeakers || undefined,
       }),
     onSuccess: (job) => {
       setReprocessOpen(false)
@@ -421,6 +435,7 @@ export default function MeetingDetailPage() {
             participants={meeting.participants}
             currentTime={currentTime}
             seekTo={seekTo}
+            speakerMatches={meeting.speaker_matches}
           />
         </main>
       </div>
@@ -513,6 +528,17 @@ export default function MeetingDetailPage() {
                   onChange={(e) => setOthersTrack(Number(e.target.value))}
                 />
               </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="num-speakers">Falantes remotos (0 = automático)</Label>
+              <Input
+                id="num-speakers"
+                type="number"
+                min={0}
+                placeholder="automático"
+                value={numSpeakers || ""}
+                onChange={(e) => setNumSpeakers(Number(e.target.value))}
+              />
             </div>
             <div className="flex items-center gap-2">
               <Checkbox

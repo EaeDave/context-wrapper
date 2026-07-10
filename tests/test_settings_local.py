@@ -77,19 +77,19 @@ def test_env_wins_over_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_local_only_allowed_keys(tmp_path: Path) -> None:
-    """settings.local.json ignora chaves desconhecidas."""
+    """settings.local.json ignora chaves desconhecidas; aceita as permitidas (incl. tuning)."""
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     toml = tmp_path / "config.toml"
     _write_toml(toml, f'data_dir = "{data_dir}"\n')
     (data_dir / "settings.local.json").write_text(
-        json.dumps({"hf_token": "tok", "whisper_model": "turbo"})
+        json.dumps({"hf_token": "tok", "whisper_model": "turbo", "unknown_field": "x"})
     )
     settings = load_settings(toml)
     assert settings.hf_token == "tok"
-    # whisper_model não é _LOCAL_KEYS → não sobrescreve
-    assert settings.whisper_model == "large-v3"
-
+    # whisper_model agora é _LOCAL_KEYS → sobrescreve
+    assert settings.whisper_model == "turbo"
+    # chave desconhecida é silenciosamente ignorada (Settings(**values) não a aceita)
 
 def test_local_llm_fields(tmp_path: Path) -> None:
     """llm_provider e llm_model podem ser sobrepostos via local."""

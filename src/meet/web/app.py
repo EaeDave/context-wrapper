@@ -138,6 +138,7 @@ class ProcessBody(BaseModel):
     others_track: int = 2
     no_llm: bool = False
     import_media: bool = True
+    num_speakers: int = 0
 
 
 class BulkDeleteBody(BaseModel):
@@ -186,7 +187,20 @@ class ReprocessBody(BaseModel):
     mic_track: int = 1
     others_track: int = 2
     no_llm: bool = False
+    num_speakers: int = 0
 
+
+
+class RenameSpeakerBody(BaseModel):
+    new_name: str
+
+
+class TuningBody(BaseModel):
+    whisper_model: str | None = None
+    language: str | None = None
+    similarity_threshold: float | None = None
+    device: str | None = None
+    compute_type: str | None = None
 
 # Verifiers PKCE pendentes: {state → verifier}. Limpo após uso, max 5 entradas.
 _pending_verifiers: dict[str, str] = {}
@@ -329,6 +343,7 @@ def create_app() -> FastAPI:
             ],
             "pending": pending,
             "groups": groups,
+            "speaker_matches": result.speaker_matches,
         }
 
     @app.patch("/api/meetings/{meeting_id}")
@@ -488,6 +503,7 @@ def create_app() -> FastAPI:
             mic_track=body.mic_track,
             others_track=body.others_track,
             no_llm=body.no_llm,
+            num_speakers=body.num_speakers,
         )
         return _serialize_job(job)
 
@@ -520,6 +536,7 @@ def create_app() -> FastAPI:
             others_track=body.others_track,
             no_llm=body.no_llm,
             import_media=body.import_media,
+            num_speakers=body.num_speakers,
         )
         return _serialize_job(job)
 
@@ -643,10 +660,30 @@ def create_app() -> FastAPI:
     def api_speakers() -> list[dict]:
         _, store = _settings_store()
         voices = store.all_voices()
+        # meetings count: COUNT DISTINCT meeting_id per speaker
+        counts_rows = store._conn.execute(
+            "SELECT speaker, COUNT(DISTINCT meeting_id) AS cnt FROM segments"
+            " WHERE speaker IS NOT NULL GROUP BY speaker"
+        ).fetchall()
+        meetings_by_name = {r["speaker"]: r["cnt"] for r in counts_rows}
         return [
-            {"name": n, "dims": len(blob) // 4}
+            {"name": n, "dims": len(blob) // 4, "meetings": meetings_by_name.get(n, 0)}
             for n, blob in sorted(voices.items())
         ]
+
+    @app.patch("/api/speakers/{name}")
+    def api_rename_speaker(name: str, body: RenameSpeakerBody) -> dict:
+        new_name = body.new_name.strip()
+        if not new_name:
+            raise HTTPException(400, "new_name não pode ser vazio")
+        _, store = _settings_store()
+        store.rename_voice(name, new_name)
+        return {"ok": True}
+
+    @app.get("/api/speakers/{name}/usage")
+    def api_speaker_usage(name: str) -> list[dict]:
+        _, store = _settings_store()
+        return store.voice_usage(name)
 
     @app.delete("/api/speakers/{name}", status_code=204)
     def api_delete_speaker(name: str) -> None:
@@ -800,6 +837,13 @@ def create_app() -> FastAPI:
                 "provider": settings.llm_provider,
                 "model": settings.llm_model,
             },
+            "tuning": {
+                "whisper_model": settings.whisper_model,
+                "language": settings.language,
+                "similarity_threshold": settings.similarity_threshold,
+                "device": settings.device,
+                "compute_type": settings.compute_type,
+            },
         }
 
     @app.put("/api/settings/hf-token")
@@ -836,6 +880,30 @@ def create_app() -> FastAPI:
             )
         settings = load_settings()
         save_local_settings({"llm_provider": body.provider, "llm_model": body.model}, settings)
+        return {"ok": True}
+
+    @app.put("/api/settings/tuning")
+    def api_put_tuning(body: TuningBody) -> dict:
+        """Atualiza parâmetros de transcrição/diarização em settings.local.json."""
+        patch: dict = {}
+        if body.similarity_threshold is not None:
+            if not (0.0 <= body.similarity_threshold <= 1.0):
+                raise HTTPException(400, "similarity_threshold deve estar em [0, 1]")
+            patch["similarity_threshold"] = body.similarity_threshold
+        if body.device is not None:
+            if body.device not in {"cuda", "cpu"}:
+                raise HTTPException(400, "device deve ser 'cuda' ou 'cpu'")
+            patch["device"] = body.device
+        if body.whisper_model is not None:
+            if not body.whisper_model.strip():
+                raise HTTPException(400, "whisper_model não pode ser vazio")
+            patch["whisper_model"] = body.whisper_model.strip()
+        if body.language is not None:
+            patch["language"] = body.language
+        if body.compute_type is not None:
+            patch["compute_type"] = body.compute_type
+        settings = load_settings()
+        save_local_settings(patch, settings)
         return {"ok": True}
 
     @app.post("/api/auth/anthropic/authorize")

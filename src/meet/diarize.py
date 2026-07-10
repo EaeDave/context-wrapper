@@ -17,6 +17,7 @@ CHECKPOINT = "pyannote/speaker-diarization-community-1"
 def diarize(
     wav: Path,
     settings: Settings,
+    num_speakers: int = 0,
 ) -> tuple[list[SpeakerTurn], dict[str, "np.ndarray"]]:
     """Roda diarização e retorna turns + centroide de embedding por falante.
 
@@ -53,7 +54,10 @@ def diarize(
         )
         pipe.to(torch.device("cpu"))
 
-    output = pipe(str(wav))
+    if num_speakers > 0:
+        output = pipe(str(wav), num_speakers=num_speakers)
+    else:
+        output = pipe(str(wav))
 
     # pyannote 4.x: DiarizeOutput(speaker_diarization, speaker_embeddings, ...).
     # Pipelines legacy (3.x) retornam a Annotation diretamente, sem embeddings.

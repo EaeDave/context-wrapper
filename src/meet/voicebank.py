@@ -26,21 +26,21 @@ def _unit(v: np.ndarray) -> np.ndarray:
     return v / n
 
 
-def resolve(
+def resolve_with_scores(
     embeddings: dict[str, np.ndarray],
     store: "Store",
     threshold: float,
-) -> dict[str, str]:
-    """Mapeia cada label de falante para nome conhecido ou mantém o label.
+) -> dict[str, tuple[str, float]]:
+    """Mapeia cada label para (nome_ou_label, best_sim).
 
     Para cada label, calcula similaridade de cosseno contra todas as vozes
-    do banco. Retorna o nome com maior similaridade se >= threshold.
+    do banco. Retorna (nome, sim) se sim >= threshold, senão (label, sim).
     """
     known: dict[str, np.ndarray] = {
         name: _from_blob(blob) for name, blob in store.all_voices().items()
     }
 
-    mapping: dict[str, str] = {}
+    result: dict[str, tuple[str, float]] = {}
     for label, emb in embeddings.items():
         unit_emb = _unit(np.asarray(emb, dtype=np.float32))
         best_name: str | None = None
@@ -53,11 +53,23 @@ def resolve(
                 best_name = name
 
         if best_name is not None and best_sim >= threshold:
-            mapping[label] = best_name
+            result[label] = (best_name, best_sim)
         else:
-            mapping[label] = label
+            result[label] = (label, best_sim if best_name is not None else 0.0)
 
-    return mapping
+    return result
+
+
+def resolve(
+    embeddings: dict[str, np.ndarray],
+    store: "Store",
+    threshold: float,
+) -> dict[str, str]:
+    """Mapeia cada label de falante para nome conhecido ou mantém o label.
+
+    Wrapper em torno de resolve_with_scores que descarta os scores.
+    """
+    return {label: name for label, (name, _) in resolve_with_scores(embeddings, store, threshold).items()}
 
 
 def enroll(name: str, embedding: np.ndarray, store: "Store") -> None:

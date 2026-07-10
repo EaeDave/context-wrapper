@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState } from "react"
-import { FileText, Pencil, UserCircle } from "lucide-react"
+import { FileText, Pencil, UserCircle, Fingerprint } from "lucide-react"
 import { useQueryClient, useMutation } from "@tanstack/react-query"
 import { toast } from "sonner"
 import type { TranscriptGroup } from "@/lib/types"
@@ -42,6 +42,7 @@ interface TranscriptProps {
   participants: string[]
   currentTime: number
   seekTo: (seconds: number) => void
+  speakerMatches?: Record<string, number>
 }
 
 export function Transcript({
@@ -50,6 +51,7 @@ export function Transcript({
   participants,
   currentTime,
   seekTo,
+  speakerMatches,
 }: TranscriptProps) {
   const [autoScroll, setAutoScroll] = useState(false)
   const activeRef = useRef<HTMLDivElement | null>(null)
@@ -167,8 +169,16 @@ export function Transcript({
 
                   {/* Speaker + text */}
                   <div>
-                    <span className={cn("text-xs", speakerClass(g.speaker))}>
+                    <span className={cn("inline-flex items-center gap-1 text-xs", speakerClass(g.speaker))}>
                       {g.speaker}
+                      {speakerMatches?.[g.speaker] != null && (
+                        <span
+                          title={`reconhecido por voz — similaridade ${speakerMatches[g.speaker].toFixed(2)}`}
+                          className="inline-flex"
+                        >
+                          <Fingerprint className="size-3 opacity-50" />
+                        </span>
+                      )}
                     </span>
                     <p className="mt-0.5 text-sm leading-relaxed">{g.text}</p>
                   </div>

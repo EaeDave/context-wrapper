@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
-import { Bot, Cpu, ExternalLink, Key } from "lucide-react"
+import { Bot, Cpu, ExternalLink, Key, SlidersHorizontal } from "lucide-react"
 
 import * as api from "@/lib/api"
 import type { SettingsInfo } from "@/lib/types"
@@ -157,6 +157,42 @@ export default function SettingsPage() {
     },
     onError: (err: Error) =>
       toast.error("Erro ao salvar LLM", { description: err.message }),
+  })
+
+  // ── Transcrição & diarização (tuning) ────────────────────────────────────
+  const [whisperModel, setWhisperModel] = useState("")
+  const [language, setLanguage] = useState("")
+  const [simThreshold, setSimThreshold] = useState(0.5)
+  const [device, setDevice] = useState("")
+  const [computeType, setComputeType] = useState("")
+  const [tuningInitialized, setTuningInitialized] = useState(false)
+
+  useEffect(() => {
+    if (settings?.tuning && !tuningInitialized) {
+      setWhisperModel(settings.tuning.whisper_model)
+      setLanguage(settings.tuning.language)
+      setSimThreshold(settings.tuning.similarity_threshold)
+      setDevice(settings.tuning.device)
+      setComputeType(settings.tuning.compute_type)
+      setTuningInitialized(true)
+    }
+  }, [settings, tuningInitialized])
+
+  const saveTuning = useMutation({
+    mutationFn: () =>
+      api.setTuning({
+        whisper_model: whisperModel,
+        language,
+        similarity_threshold: simThreshold,
+        device,
+        compute_type: computeType,
+      }),
+    onSuccess: () => {
+      toast.success("Configurações de transcrição salvas")
+      queryClient.invalidateQueries({ queryKey: ["settings"] })
+    },
+    onError: (err: Error) =>
+      toast.error("Erro ao salvar", { description: err.message }),
   })
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -449,6 +485,97 @@ export default function SettingsPage() {
             disabled={!llmProvider || saveLlm.isPending}
           >
             Salvar
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* ── Transcrição & diarização ──────────────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base font-semibold">
+            <SlidersHorizontal className="size-4" />
+            Transcrição &amp; diarização
+          </CardTitle>
+          <CardDescription>
+            Parâmetros do pipeline de transcrição e reconhecimento de voz.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <Label>Modelo Whisper</Label>
+              <Select value={whisperModel} onValueChange={setWhisperModel}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecionar modelo" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="large-v3">large-v3</SelectItem>
+                  <SelectItem value="turbo">turbo</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="language-input">Idioma</Label>
+              <Input
+                id="language-input"
+                placeholder="pt"
+                value={language}
+                onChange={(e) => setLanguage(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label>Similaridade mínima de voz</Label>
+              <span className="text-sm font-mono tabular-nums text-muted-foreground">
+                {simThreshold.toFixed(2)}
+              </span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={simThreshold}
+              onChange={(e) => setSimThreshold(Number(e.target.value))}
+              className="w-full accent-primary h-1.5 rounded-lg cursor-pointer"
+            />
+            <p className="text-xs text-muted-foreground">
+              Cosseno mínimo para reconhecer uma voz conhecida. Valores menores
+              aceitam correspondências mais distantes.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <Label>Dispositivo</Label>
+              <Select value={device} onValueChange={setDevice}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecionar" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="cuda">cuda (GPU)</SelectItem>
+                  <SelectItem value="cpu">cpu</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="compute-type-input">Tipo de computação</Label>
+              <Input
+                id="compute-type-input"
+                placeholder="float16"
+                value={computeType}
+                onChange={(e) => setComputeType(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <Button
+            onClick={() => saveTuning.mutate()}
+            disabled={!whisperModel || !device || saveTuning.isPending}
+          >
+            {saveTuning.isPending ? "Salvando…" : "Salvar"}
           </Button>
         </CardContent>
       </Card>

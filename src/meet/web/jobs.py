@@ -124,6 +124,7 @@ class JobManager:
                 others_track=int(job.params.get("others_track", 2)),
                 no_llm=bool(job.params.get("no_llm", False)),
                 import_media=bool(job.params.get("import_media", True)),
+                num_speakers=int(job.params.get("num_speakers", 0)),
                 on_progress=progress,
             )
             with self._lock:
@@ -184,6 +185,7 @@ class JobManager:
                 mic_track=int(job.params.get("mic_track", 1)),
                 others_track=int(job.params.get("others_track", 2)),
                 no_llm=bool(job.params.get("no_llm", False)),
+                num_speakers=int(job.params.get("num_speakers", 0)),
                 on_progress=progress,
             )
             row = store._conn.execute(

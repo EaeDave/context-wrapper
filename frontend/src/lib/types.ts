@@ -73,6 +73,7 @@ export interface MeetingDetail {
   summary: string
   action_items: ActionItem[]
   pending: string[]            // labels SPEAKER_XX aguardando nome
+  speaker_matches: Record<string, number>  // nome → similaridade cosseno
   groups: TranscriptGroup[]
 }
 
@@ -98,6 +99,14 @@ export interface ProbeResult {
 export interface Speaker {
   name: string
   dims: number           // len(blob)//4
+  meetings: number       // nº de reuniões com segmentos deste falante
+}
+
+export interface VoiceUsage {
+  meeting_id: number
+  title: string
+  date: string
+  count: number          // nº de segmentos com este falante nessa reunião
 }
 
 export interface ProcessRequest {
@@ -105,6 +114,7 @@ export interface ProcessRequest {
   title?: string
   mic_track?: number
   others_track?: number
+  num_speakers?: number  // nº de falantes remotos (0 = automático)
   no_llm?: boolean
   import_media?: boolean
 }
@@ -113,6 +123,13 @@ export interface SettingsInfo {
   hf_token: { configured: boolean; masked: string | null; source: "local" | "config" | "env" | null }
   anthropic: { connected: boolean; email: string | null; expires: number | null; api_key_configured: boolean }
   llm: { provider: string; model: string }
+  tuning: {
+    whisper_model: string
+    language: string
+    similarity_threshold: number
+    device: string
+    compute_type: string
+  }
 }
 
 export interface AuthorizeResult { url: string; state: string }

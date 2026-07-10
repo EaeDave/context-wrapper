@@ -22,7 +22,10 @@ _ENV = {
 }
 
 # Chaves que settings.local.json pode sobrescrever.
-_LOCAL_KEYS: frozenset[str] = frozenset({"hf_token", "llm_provider", "llm_model"})
+_LOCAL_KEYS: frozenset[str] = frozenset({
+    "hf_token", "llm_provider", "llm_model",
+    "whisper_model", "language", "similarity_threshold", "device", "compute_type",
+})
 
 
 @dataclass

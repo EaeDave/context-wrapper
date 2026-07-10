@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -62,6 +63,7 @@ _MEETING_EXTRA_COLS: list[tuple[str, str]] = [
     ("media_managed", "INTEGER NOT NULL DEFAULT 0"),
     ("created_at", "TEXT NOT NULL DEFAULT ''"),
     ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ("speaker_matches", "TEXT NOT NULL DEFAULT '{}'"),
 ]
 
 _ACTION_ITEM_EXTRA_COLS: list[tuple[str, str]] = [
@@ -146,8 +148,8 @@ class Store:
             cur = self._conn.execute(
                 "INSERT INTO meetings"
                 " (date, title, source, duration, summary, md_path,"
-                "  source_origin, media_managed, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                "  source_origin, media_managed, created_at, updated_at, speaker_matches)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
                 (
                     result.date,
                     result.title,
@@ -158,6 +160,7 @@ class Store:
                     origin,
                     now,
                     now,
+                    json.dumps(result.speaker_matches),
                 ),
             )
             meeting_id: int = cur.lastrowid  # type: ignore[assignment]
@@ -194,7 +197,7 @@ class Store:
         """Reconstrói MeetingResult; anexa attrs de mídia/md_path."""
         row = self._conn.execute(
             "SELECT id, date, title, source, duration, summary, md_path,"
-            "       source_origin, media_managed, created_at, updated_at"
+            "       source_origin, media_managed, created_at, updated_at, speaker_matches"
             " FROM meetings WHERE id = ?",
             (meeting_id,),
         ).fetchone()
@@ -245,6 +248,7 @@ class Store:
             summary=row["summary"],
             action_items=action_items,
             segments=segments,
+            speaker_matches=json.loads(row["speaker_matches"] or "{}"),
         )
         result.md_path = Path(row["md_path"]) if row["md_path"] else None  # type: ignore[attr-defined]
         result.meeting_id = meeting_id  # type: ignore[attr-defined]
@@ -622,9 +626,9 @@ class Store:
         """Substitui segments e action_items in-place; preserva source/date/media. Atômico."""
         with self._conn:
             self._conn.execute(
-                "UPDATE meetings SET title=?, summary=?, duration=?, updated_at=?"
+                "UPDATE meetings SET title=?, summary=?, duration=?, updated_at=?, speaker_matches=?"
                 " WHERE id=?",
-                (result.title, result.summary, result.duration, _now(), meeting_id),
+                (result.title, result.summary, result.duration, _now(), json.dumps(result.speaker_matches), meeting_id),
             )
             self._conn.execute(
                 "DELETE FROM segments WHERE meeting_id=?", (meeting_id,)
@@ -770,6 +774,100 @@ class Store:
         """Remove voz do banco."""
         with self._conn:
             self._conn.execute("DELETE FROM voices WHERE name = ?", (name,))
+
+    def rename_voice(self, old: str, new: str) -> None:
+        """Renomeia ou funde voz no banco.
+
+        - old == new: noop.
+        - new não existe: move embedding de old para new; remove old.
+        - new já existe (merge): média (emb_old + emb_new)/2 → new; remove old.
+        Em ambos os casos: UPDATE segments SET speaker=new WHERE speaker=old em todas
+        as reuniões; reindexar FTS; tudo atômico. Regen .md após commit.
+        """
+        if old == new:
+            return
+        import numpy as np
+
+        def _from_blob(blob: bytes) -> np.ndarray:
+            return np.frombuffer(blob, dtype=np.float32).copy()
+
+        def _to_blob(v: np.ndarray) -> bytes:
+            return np.asarray(v, dtype=np.float32).tobytes()
+
+        old_row = self._conn.execute(
+            "SELECT embedding FROM voices WHERE name = ?", (old,)
+        ).fetchone()
+        if old_row is None:
+            return  # old não existe — noop
+        old_blob = bytes(old_row["embedding"])
+
+        new_row = self._conn.execute(
+            "SELECT embedding FROM voices WHERE name = ?", (new,)
+        ).fetchone()
+
+        if new_row is not None:
+            # merge: média dos embeddings
+            merged = (_from_blob(old_blob) + _from_blob(bytes(new_row["embedding"]))) / 2.0
+            new_blob = _to_blob(merged)
+        else:
+            new_blob = old_blob
+
+        # Reuniões afetadas (para regen .md após commit)
+        affected_rows = self._conn.execute(
+            "SELECT DISTINCT meeting_id FROM segments WHERE speaker = ?", (old,)
+        ).fetchall()
+        affected_ids = [r["meeting_id"] for r in affected_rows]
+
+        with self._conn:
+            # Upsert do embedding new
+            self._conn.execute(
+                "INSERT INTO voices (name, embedding) VALUES (?, ?)"
+                " ON CONFLICT(name) DO UPDATE SET embedding = excluded.embedding",
+                (new, new_blob),
+            )
+            # Remove old
+            self._conn.execute("DELETE FROM voices WHERE name = ?", (old,))
+            # Atualizar segments
+            self._conn.execute(
+                "UPDATE segments SET speaker = ? WHERE speaker = ?", (new, old)
+            )
+            # Reindexar FTS para reuniões afetadas
+            for mid in affected_ids:
+                self._conn.execute(
+                    "DELETE FROM search_index WHERE meeting_id = ?", (mid,)
+                )
+                self._reindex_meeting_fts(mid)
+                self._conn.execute(
+                    "UPDATE meetings SET updated_at = ? WHERE id = ?", (_now(), mid)
+                )
+
+        # Regen .md (I/O fora da transação)
+        for mid in affected_ids:
+            self._regen_md(mid)
+
+    def voice_usage(self, name: str) -> list[dict]:
+        """Reuniões que contêm segmentos do falante name.
+
+        Retorna [{meeting_id, title, date, count}] ordenado por date desc.
+        """
+        rows = self._conn.execute(
+            "SELECT s.meeting_id, m.title, m.date, COUNT(*) AS count"
+            " FROM segments s"
+            " JOIN meetings m ON m.id = s.meeting_id"
+            " WHERE s.speaker = ?"
+            " GROUP BY s.meeting_id"
+            " ORDER BY m.date DESC, s.meeting_id DESC",
+            (name,),
+        ).fetchall()
+        return [
+            {
+                "meeting_id": r["meeting_id"],
+                "title": r["title"],
+                "date": r["date"],
+                "count": r["count"],
+            }
+            for r in rows
+        ]
 
     # ------------------------------------------------------------------
     # Internos

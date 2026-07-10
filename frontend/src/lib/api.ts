@@ -11,6 +11,7 @@ import type {
   AuthorizeResult,
   ActionItem,
   Task,
+  VoiceUsage,
 } from "./types"
 
 async function request<T>(
@@ -158,9 +159,27 @@ export const updateTurn = (
 
 export const reprocessMeeting = (
   meetingId: number,
-  body: { mic_track?: number; others_track?: number; no_llm?: boolean },
+  body: { mic_track?: number; others_track?: number; no_llm?: boolean; num_speakers?: number },
 ): Promise<Job> =>
   request("POST", `/api/meetings/${meetingId}/reprocess`, body)
 
 export const reextractMeeting = (meetingId: number): Promise<Job> =>
   request("POST", `/api/meetings/${meetingId}/reextract`)
+
+export const renameVoice = (
+  name: string,
+  newName: string,
+): Promise<{ ok: true }> =>
+  request("PATCH", `/api/speakers/${encodeURIComponent(name)}`, { new_name: newName })
+
+export const getVoiceUsage = (name: string): Promise<VoiceUsage[]> =>
+  request("GET", `/api/speakers/${encodeURIComponent(name)}/usage`)
+
+export const setTuning = (patch: {
+  whisper_model?: string
+  language?: string
+  similarity_threshold?: number
+  device?: string
+  compute_type?: string
+}): Promise<{ ok: true }> =>
+  request("PUT", "/api/settings/tuning", patch)

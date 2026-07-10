@@ -74,6 +74,7 @@ export default function NewMeetingPage() {
   const [title, setTitle] = useState("")
   const [micTrack, setMicTrack] = useState("1")
   const [othersTrack, setOthersTrack] = useState("2")
+  const [numSpeakers, setNumSpeakers] = useState("")
   const [importMedia, setImportMedia] = useState(true)
   const [noLlm, setNoLlm] = useState(false)
 
@@ -100,6 +101,7 @@ export default function NewMeetingPage() {
         title: title.trim() || undefined,
         mic_track: Number(micTrack),
         others_track: Number(othersTrack),
+        num_speakers: numSpeakers.trim() ? Number(numSpeakers) : 0,
         import_media: importMedia,
         no_llm: noLlm,
       }),
@@ -323,6 +325,22 @@ export default function NewMeetingPage() {
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+
+            {/* Num speakers */}
+            <div className="space-y-1.5">
+              <Label htmlFor="num-speakers">Falantes remotos (fora você)</Label>
+              <Input
+                id="num-speakers"
+                type="number"
+                min={0}
+                placeholder="automático"
+                value={numSpeakers}
+                onChange={(e) => setNumSpeakers(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Nº de participantes remotos na track "outros". Deixe vazio para detecção automática.
+              </p>
             </div>
 
             {/* Checkboxes */}
