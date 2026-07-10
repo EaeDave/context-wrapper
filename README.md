@@ -117,6 +117,8 @@ tracks separadas do mkv original.
 
 UI local minimalista: listar reuniões, processar gravações, acompanhar jobs,
 ver transcript/action items, nomear falantes, buscar no histórico.
+Player embutido com [Plyr](https://github.com/sampotts/plyr) (vendored, offline)
+— vídeo + tracks misturadas, ou só áudio.
 
 ```sh
 uv run meet serve            # http://127.0.0.1:8741 (abre o browser)

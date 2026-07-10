@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{% block title %}meet{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css" />
+  {% block head %}{% endblock %}
   <script src="/static/htmx.min.js" defer></script>
 </head>
 <body>
@@ -22,5 +23,6 @@
     </main>
     <footer class="foot">localhost · dados em ~/.local/share/meet</footer>
   </div>
+  {% block scripts %}{% endblock %}
 </body>
 </html>

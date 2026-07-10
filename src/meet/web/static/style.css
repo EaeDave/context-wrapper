@@ -547,9 +547,10 @@ tr:last-child td {
   font-size: 0.95rem;
 }
 
-/* embedded media player */
+/* media player — Plyr shell + dark theme tokens */
 .player-card {
   padding: 1rem 1.1rem 1.15rem;
+  overflow: hidden;
 }
 .player-label {
   margin: 0 0 0.75rem;
@@ -560,33 +561,64 @@ tr:last-child td {
   color: var(--faint);
   font-size: 0.8rem;
 }
-.player {
+.player-shell {
   width: 100%;
   border-radius: var(--radius-sm);
-  accent-color: var(--accent);
+  overflow: hidden;
   background: #000;
 }
-audio.player {
-  height: 2.5rem;
+.player-shell--audio {
   background: transparent;
-}
-.video-player {
-  display: block;
-  width: 100%;
-  min-height: 220px;
-  max-height: min(70vh, 520px);
-  aspect-ratio: 16 / 9;
-  object-fit: contain;
-  background: #000;
 }
 .player-error {
   margin: 0.65rem 0 0;
   font-size: 0.85rem;
   color: var(--danger);
 }
-/* dark-friendly native controls where supported */
-.player::-webkit-media-controls-panel {
-  background: color-mix(in srgb, var(--bg) 70%, var(--bg-elev));
+
+/* Plyr dark integration (matches meet UI) */
+.player-card {
+  --plyr-color-main: var(--accent);
+  --plyr-video-background: #0a0c10;
+  --plyr-menu-background: var(--bg-elev);
+  --plyr-menu-color: var(--text);
+  --plyr-audio-controls-background: var(--bg);
+  --plyr-audio-control-color: var(--muted);
+  --plyr-audio-control-color-hover: var(--text);
+  --plyr-range-fill-background: var(--accent);
+  --plyr-video-control-color: #fff;
+  --plyr-video-control-background-hover: color-mix(in srgb, var(--accent) 35%, transparent);
+  --plyr-control-radius: 6px;
+  --plyr-font-family: var(--font);
+}
+.player-card .plyr {
+  width: 100%;
+  border-radius: var(--radius-sm);
+}
+.player-card .plyr--video {
+  min-height: 280px;
+}
+.player-card .plyr__video-wrapper {
+  background: #000;
+}
+.player-card .plyr--audio {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+/* fallback while Plyr JS carrega */
+.player-shell > video {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 280px;
+  max-height: min(70vh, 560px);
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+  background: #000;
+}
+.player-shell > audio {
+  display: block;
+  width: 100%;
 }
 
 .inline-form {
