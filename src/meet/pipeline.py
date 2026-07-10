@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 from collections.abc import Callable
 from datetime import date
@@ -65,30 +66,30 @@ def run_pipeline(
         )
     finally:
         if not keep_wav:
-            import shutil
-
             shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _run(
+def _analyse(
     *,
     video: Path,
-    title: str | None,
     mic_track: int,
     others_track: int,
     no_llm: bool,
-    import_media: bool,
     settings: Settings,
     store: Store,
     workdir: Path,
     today: str,
     progress: ProgressCb,
-) -> tuple[int, MeetingResult, Path]:
+    title: str | None = None,
+) -> tuple[MeetingResult, dict[str, Any], list[str]]:
+    """Faz análise completa (audio→transcribe→diarize→merge→llm) sem salvar no banco.
+
+    Retorna (result, embeddings, unresolved_labels).
+    """
     # Imports pesados (torch/whisper/pyannote) só aqui
     from . import audio as audio_mod
     from . import diarize as diarize_mod
     from . import merge as merge_mod
-    from . import render as render_mod
     from . import transcribe as transcribe_mod
     from . import voicebank as voicebank_mod
 
@@ -175,6 +176,37 @@ def _run(
         action_items=action_items,
         segments=segments,
     )
+    return result, embeddings, unresolved
+
+
+def _run(
+    *,
+    video: Path,
+    title: str | None,
+    mic_track: int,
+    others_track: int,
+    no_llm: bool,
+    import_media: bool,
+    settings: Settings,
+    store: Store,
+    workdir: Path,
+    today: str,
+    progress: ProgressCb,
+) -> tuple[int, MeetingResult, Path]:
+    from . import render as render_mod
+
+    result, embeddings, unresolved = _analyse(
+        video=video,
+        mic_track=mic_track,
+        others_track=others_track,
+        no_llm=no_llm,
+        settings=settings,
+        store=store,
+        workdir=workdir,
+        today=today,
+        progress=progress,
+        title=title,
+    )
 
     progress("Salvando markdown e banco…")
     md_content = render_mod.to_markdown(result)
@@ -205,3 +237,105 @@ def _run(
 
     progress(f"Concluído — reunião #{meeting_id}")
     return meeting_id, result, md_path
+
+
+def reprocess_meeting(
+    meeting_id: int,
+    *,
+    settings: Settings,
+    store: Store,
+    mic_track: int = 1,
+    others_track: int = 2,
+    no_llm: bool = False,
+    on_progress: ProgressCb | None = None,
+) -> MeetingResult:
+    """Reprocessa reunião existente in-place (áudio completo → replace_meeting_content).
+
+    Preserva title do usuário, source, date e media. Grava pending .npz para
+    labels não resolvidos. Regenera o .md.
+    """
+    from . import render as render_mod
+
+    progress = on_progress or _noop
+    existing = store.get_meeting(meeting_id)
+    if existing is None:
+        raise ValueError(f"Reunião #{meeting_id} não encontrada")
+
+    source = Path(existing.source).expanduser()
+    if not source.is_file():
+        raise FileNotFoundError(
+            f"Arquivo fonte não encontrado: {existing.source}"
+        )
+
+    workdir = Path(tempfile.mkdtemp(prefix="meet-reprocess-"))
+    try:
+        result, embeddings, unresolved = _analyse(
+            video=source,
+            mic_track=mic_track,
+            others_track=others_track,
+            no_llm=no_llm,
+            settings=settings,
+            store=store,
+            workdir=workdir,
+            today=existing.date,
+            progress=progress,
+        )
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    # Preservar o title existente (não sobrescrever com sugestão do LLM)
+    result.title = existing.title
+
+    progress("Salvando resultado no banco…")
+    store.replace_meeting_content(meeting_id, result)
+
+    # Gravar pending .npz para labels não resolvidos
+    if unresolved:
+        import numpy as np
+
+        pending_dir = settings.data_dir / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        pending_data = {
+            lbl: embeddings[lbl] for lbl in unresolved if lbl in embeddings
+        }
+        if pending_data:
+            np.savez(str(pending_dir / f"{meeting_id}.npz"), **pending_data)
+
+    # Regenerar .md
+    store._regen_md(meeting_id)
+
+    progress(f"Reprocessamento concluído — reunião #{meeting_id}")
+    return result
+
+
+def reextract_meeting(
+    meeting_id: int,
+    *,
+    settings: Settings,
+    store: Store,
+    on_progress: ProgressCb | None = None,
+) -> None:
+    """Re-extrai resumo e action items via LLM sobre os segments existentes.
+
+    NÃO reprocessa áudio. Preserva title existente.
+    """
+    progress = on_progress or _noop
+    existing = store.get_meeting(meeting_id)
+    if existing is None:
+        raise ValueError(f"Reunião #{meeting_id} não encontrada")
+
+    from . import extract as extract_mod
+
+    progress("Extraindo resumo e action items (LLM)…")
+    try:
+        summary, action_items, _suggested_title = extract_mod.extract(
+            existing.segments, existing.participants, settings
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Erro na extração LLM: {exc}") from exc
+
+    progress("Salvando resultado no banco…")
+    store.update_meeting_extract(meeting_id, summary, action_items, None)
+
+    store._regen_md(meeting_id)
+    progress(f"Re-extração concluída — reunião #{meeting_id}")

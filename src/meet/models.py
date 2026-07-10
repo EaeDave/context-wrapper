@@ -30,6 +30,8 @@ class TranscriptSegment:
     # Palavras com timestamps (transiente: usado só p/ atribuir falante por palavra
     # no merge; não é persistido no banco).
     words: list[Word] | None = None
+    # id do banco (transiente — preenchido ao ler via get_meeting p/ a UI referenciar turnos).
+    id: int | None = None
 
 
 @dataclass
@@ -65,7 +67,9 @@ class ActionItem:
     details: str | None = None  # detalhes técnicos literais mencionados
     requested_by: str | None = None
     priority: str = "media"  # "alta" | "media" | "baixa"
-
+    id: int | None = None       # preenchido ao ler do banco
+    status: str = "aberto"      # "aberto" | "feito"
+    due: str | None = None      # "YYYY-MM-DD" ou None
 
 @dataclass
 class MeetingResult:

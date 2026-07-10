@@ -61,20 +61,24 @@ def _pending_labels(settings, meeting_id: int) -> list[str]:
 def _group_transcript(segments) -> list[dict]:
     """Agrupa segmentos consecutivos do mesmo falante.
 
-    Retorna start/end numéricos + text concatenado; sem start_fmt nem texts.
+    Retorna start/end numéricos + text concatenado + seg_ids dos segmentos agrupados.
     """
     groups: list[dict] = []
     for seg in segments:
         if groups and groups[-1]["speaker"] == seg.speaker:
             groups[-1]["_texts"].append(seg.text)
             groups[-1]["end"] = seg.end
+            if seg.id is not None:
+                groups[-1]["seg_ids"].append(seg.id)
         else:
+            seg_ids = [seg.id] if seg.id is not None else []
             groups.append(
                 {
                     "speaker": seg.speaker or "?",
                     "start": seg.start,
                     "end": seg.end,
                     "_texts": [seg.text],
+                    "seg_ids": seg_ids,
                 }
             )
     return [
@@ -83,6 +87,7 @@ def _group_transcript(segments) -> list[dict]:
             "start": g["start"],
             "end": g["end"],
             "text": " ".join(g["_texts"]),
+            "seg_ids": g["seg_ids"],
         }
         for g in groups
     ]
@@ -151,6 +156,36 @@ class LLMSettingsBody(BaseModel):
 class ExchangeBody(BaseModel):
     code: str
     state: str
+
+
+class PatchActionItemBody(BaseModel):
+    what: str | None = None
+    where: str | None = None
+    details: str | None = None
+    requested_by: str | None = None
+    priority: str | None = None
+    status: str | None = None
+    due: str | None = None
+
+
+class AddActionItemBody(BaseModel):
+    what: str
+    where: str | None = None
+    details: str | None = None
+    requested_by: str | None = None
+    priority: str = "media"
+
+
+class PatchTurnBody(BaseModel):
+    seg_ids: list[int]
+    text: str | None = None
+    speaker: str | None = None
+
+
+class ReprocessBody(BaseModel):
+    mic_track: int = 1
+    others_track: int = 2
+    no_llm: bool = False
 
 
 # Verifiers PKCE pendentes: {state → verifier}. Limpo após uso, max 5 entradas.
@@ -281,11 +316,14 @@ def create_app() -> FastAPI:
             "summary": result.summary or "",
             "action_items": [
                 {
+                    "id": ai.id,
                     "what": ai.what,
                     "where": ai.where,
                     "details": ai.details,
                     "requested_by": ai.requested_by,
                     "priority": ai.priority,
+                    "status": ai.status,
+                    "due": ai.due,
                 }
                 for ai in result.action_items
             ],
@@ -376,6 +414,95 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "Arquivo fonte não encontrado no disco")
         job = manager.submit(kind="mix", label=f"mix · {path.name}", video=str(path))
         return _serialize_job(job)
+
+    # ── Action items ──────────────────────────────────────────────────────────
+
+    @app.patch("/api/action-items/{item_id}")
+    def api_patch_action_item(item_id: int, body: PatchActionItemBody) -> dict:
+        _, store = _settings_store()
+        fields = {k: v for k, v in body.model_dump().items() if v is not None}
+        if not store.update_action_item(item_id, fields):
+            raise HTTPException(404, "Action item não encontrado")
+        return {"ok": True}
+
+    @app.post("/api/meetings/{meeting_id}/action-items")
+    def api_add_action_item(meeting_id: int, body: AddActionItemBody) -> dict:
+        from ..models import ActionItem
+
+        if not body.what.strip():
+            raise HTTPException(400, "Campo 'what' obrigatório")
+        _, store = _settings_store()
+        if store.get_meeting(meeting_id) is None:
+            raise HTTPException(404, "Reunião não encontrada")
+        item = ActionItem(
+            what=body.what.strip(),
+            where=body.where,
+            details=body.details,
+            requested_by=body.requested_by,
+            priority=body.priority,
+        )
+        new_id = store.add_action_item(meeting_id, item)
+        return {"id": new_id}
+
+    @app.delete("/api/action-items/{item_id}", status_code=204)
+    def api_delete_action_item(item_id: int) -> None:
+        _, store = _settings_store()
+        if not store.delete_action_item(item_id):
+            raise HTTPException(404, "Action item não encontrado")
+
+    @app.get("/api/tasks")
+    def api_tasks(status: str = "aberto") -> list[dict]:
+        if status not in {"aberto", "feito", "todos"}:
+            raise HTTPException(400, "status deve ser aberto|feito|todos")
+        _, store = _settings_store()
+        return store.list_tasks(status)
+
+    # ── Editar turno do transcript ────────────────────────────────────────────
+
+    @app.patch("/api/meetings/{meeting_id}/turn")
+    def api_patch_turn(meeting_id: int, body: PatchTurnBody) -> dict:
+        if not body.seg_ids:
+            raise HTTPException(400, "seg_ids não pode ser vazio")
+        if body.text is None and body.speaker is None:
+            raise HTTPException(400, "Forneça text ou speaker")
+        _, store = _settings_store()
+        if not store.update_turn(meeting_id, body.seg_ids, body.text, body.speaker):
+            raise HTTPException(400, "Nenhum seg_id encontrado nesta reunião")
+        return {"ok": True}
+
+    # ── Reprocess / reextract ─────────────────────────────────────────────────
+
+    @app.post("/api/meetings/{meeting_id}/reprocess")
+    def api_reprocess(meeting_id: int, body: ReprocessBody) -> dict:
+        settings, store = _settings_store()
+        result = store.get_meeting(meeting_id)
+        if result is None:
+            raise HTTPException(404, "Reunião não encontrada")
+        src = Path(result.source)
+        if not src.is_file():
+            raise HTTPException(400, f"Arquivo fonte não encontrado: {result.source}")
+        job = manager.submit(
+            kind="reprocess",
+            label=f"Reprocessamento · {src.name}",
+            meeting_id=meeting_id,
+            mic_track=body.mic_track,
+            others_track=body.others_track,
+            no_llm=body.no_llm,
+        )
+        return _serialize_job(job)
+
+    @app.post("/api/meetings/{meeting_id}/reextract")
+    def api_reextract(meeting_id: int) -> dict:
+        _, store = _settings_store()
+        if store.get_meeting(meeting_id) is None:
+            raise HTTPException(404, "Reunião não encontrada")
+        job = manager.submit(
+            kind="reextract",
+            label=f"Re-extração · #{meeting_id}",
+            meeting_id=meeting_id,
+        )
+        return _serialize_job(job)
+
 
     # ── Process ───────────────────────────────────────────────────────────────
 

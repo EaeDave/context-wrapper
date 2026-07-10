@@ -97,7 +97,12 @@ export default function JobPage() {
           {job.label}
         </h1>
         <Badge variant="outline" className="shrink-0">
-          {job.kind === "process" ? "Processamento" : "Mixagem"}
+          {{
+            process: "Processamento",
+            mix: "Mixagem",
+            reprocess: "Reprocessamento",
+            reextract: "Re-extração",
+          }[job.kind] ?? job.kind}
         </Badge>
         <StatusBadge status={job.status} />
       </div>

@@ -33,11 +33,14 @@ export interface SearchResult {
 }
 
 export interface ActionItem {
+  id: number
   what: string
   where: string | null
   details: string | null
   requested_by: string | null
   priority: "alta" | "media" | "baixa"
+  status: "aberto" | "feito"
+  due: string | null
 }
 
 export interface TranscriptGroup {
@@ -45,6 +48,7 @@ export interface TranscriptGroup {
   start: number          // segundos — usar p/ seek no player
   end: number
   text: string           // concatenado
+  seg_ids: number[]      // ids dos segmentos deste turno agrupado
 }
 
 export interface MeetingDetail {
@@ -112,3 +116,17 @@ export interface SettingsInfo {
 }
 
 export interface AuthorizeResult { url: string; state: string }
+
+export interface Task {
+  id: number
+  meeting_id: number
+  meeting_title: string
+  date: string
+  what: string
+  where: string | null
+  details: string | null
+  requested_by: string | null
+  priority: "alta" | "media" | "baixa"
+  status: "aberto" | "feito"
+  due: string | null
+}

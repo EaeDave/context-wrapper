@@ -14,6 +14,8 @@ import {
   VideoOff,
   Users,
   HardDrive,
+  RefreshCcw,
+  Wand2,
 } from "lucide-react"
 import type { MeetingDetail } from "@/lib/types"
 import * as api from "@/lib/api"
@@ -21,6 +23,8 @@ import { formatDuration } from "@/lib/format"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
@@ -105,9 +109,11 @@ interface HeaderProps {
   onRename: () => void
   onDelete: () => void
   onRemix: () => void
+  onReextract: () => void
+  onReprocess: () => void
 }
 
-function MeetingHeader({ meeting, onRename, onDelete, onRemix }: HeaderProps) {
+function MeetingHeader({ meeting, onRename, onDelete, onRemix, onReextract, onReprocess }: HeaderProps) {
   return (
     <div className="flex items-start justify-between gap-4">
       <div className="min-w-0 space-y-2">
@@ -213,6 +219,15 @@ function MeetingHeader({ meeting, onRename, onDelete, onRemix }: HeaderProps) {
             </DropdownMenuItem>
           )}
           <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={onReextract}>
+            <Wand2 className="size-4" />
+            Re-extrair resumo
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={onReprocess} disabled={!meeting.source_exists}>
+            <RefreshCcw className="size-4" />
+            Reprocessar (completo)
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
           <DropdownMenuItem onClick={onRemix} disabled={!meeting.source_exists}>
             <Shuffle className="size-4" />
             Remixar
@@ -264,6 +279,12 @@ export default function MeetingDetailPage() {
   // Delete confirm
   const [deleteOpen, setDeleteOpen] = useState(false)
 
+  // Reprocess dialog
+  const [reprocessOpen, setReprocessOpen] = useState(false)
+  const [micTrack, setMicTrack] = useState(1)
+  const [othersTrack, setOthersTrack] = useState(2)
+  const [noLlm, setNoLlm] = useState(false)
+
   const { data: meeting, isLoading, error } = useQuery<MeetingDetail>({
     queryKey: ["meeting", meetingId],
     queryFn: () => api.getMeeting(meetingId),
@@ -304,6 +325,32 @@ export default function MeetingDetailPage() {
     onError: (e: Error) => toast.error(e.message),
   })
 
+  // ── Reextract mutation ───────────────────────────────────────────────────
+  const reextractMutation = useMutation({
+    mutationFn: () => api.reextractMeeting(meetingId),
+    onSuccess: (job) => {
+      toast.success("Re-extração iniciada")
+      void navigate(`/jobs/${job.id}`)
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  // ── Reprocess mutation ───────────────────────────────────────────────────
+  const reprocessMutation = useMutation({
+    mutationFn: () =>
+      api.reprocessMeeting(meetingId, {
+        mic_track: micTrack,
+        others_track: othersTrack,
+        no_llm: noLlm,
+      }),
+    onSuccess: (job) => {
+      setReprocessOpen(false)
+      toast.success("Reprocessamento iniciado")
+      void navigate(`/jobs/${job.id}`)
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
   const handleRenameOpen = useCallback(() => {
     setRenameValue(meeting?.title ?? "")
     setRenameOpen(true)
@@ -336,6 +383,8 @@ export default function MeetingDetailPage() {
         onRename={handleRenameOpen}
         onDelete={() => setDeleteOpen(true)}
         onRemix={() => remixMutation.mutate()}
+        onReextract={() => reextractMutation.mutate()}
+        onReprocess={() => setReprocessOpen(true)}
       />
 
       {/*
@@ -364,12 +413,12 @@ export default function MeetingDetailPage() {
 
           {meeting.pending.length > 0 && <SpeakerAssign meeting={meeting} />}
 
-          {meeting.action_items.length > 0 && (
-            <ActionItems items={meeting.action_items} />
-          )}
+          <ActionItems meetingId={meetingId} items={meeting.action_items} />
 
           <Transcript
+            meetingId={meetingId}
             groups={meeting.groups}
+            participants={meeting.participants}
             currentTime={currentTime}
             seekTo={seekTo}
           />
@@ -435,6 +484,64 @@ export default function MeetingDetailPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* ── Reprocess dialog ─────────────────────────────────────────────── */}
+      <Dialog open={reprocessOpen} onOpenChange={setReprocessOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Reprocessar reunião</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="mic-track">Track mic</Label>
+                <Input
+                  id="mic-track"
+                  type="number"
+                  min={1}
+                  value={micTrack}
+                  onChange={(e) => setMicTrack(Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="others-track">Track outros</Label>
+                <Input
+                  id="others-track"
+                  type="number"
+                  min={1}
+                  value={othersTrack}
+                  onChange={(e) => setOthersTrack(Number(e.target.value))}
+                />
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="no-llm"
+                checked={noLlm}
+                onCheckedChange={(v) => setNoLlm(!!v)}
+              />
+              <Label htmlFor="no-llm" className="cursor-pointer font-normal">
+                Sem LLM (apenas transcrição)
+              </Label>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setReprocessOpen(false)}
+              disabled={reprocessMutation.isPending}
+            >
+              Cancelar
+            </Button>
+            <Button
+              onClick={() => reprocessMutation.mutate()}
+              disabled={reprocessMutation.isPending}
+            >
+              Reprocessar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

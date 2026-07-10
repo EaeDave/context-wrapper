@@ -1,12 +1,13 @@
 import { useState, useEffect } from "react"
 import { NavLink, Outlet } from "react-router"
-import { Search, Settings } from "lucide-react"
+import { Search, Settings, ListTodo } from "lucide-react"
 import { Toaster } from "@/components/ui/sonner"
 import { cn } from "@/lib/utils"
 import SearchCommand from "@/components/search-command"
 
-const NAV: { to: string; label: string; end?: boolean }[] = [
+const NAV: { to: string; label: string; end?: boolean; icon?: React.FC<{ className?: string }> }[] = [
   { to: "/", label: "Reuniões", end: true },
+  { to: "/tasks", label: "Tarefas", icon: ListTodo },
   { to: "/new", label: "Nova reunião" },
   { to: "/speakers", label: "Vozes" },
 ]
@@ -33,20 +34,21 @@ export default function Layout() {
             meet
           </span>
           <nav className="flex items-center gap-1">
-            {NAV.map(({ to, label, end }) => (
+            {NAV.map(({ to, label, end, icon: Icon }) => (
               <NavLink
                 key={to}
                 to={to}
                 end={end}
                 className={({ isActive }) =>
                   cn(
-                    "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+                    "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
                     isActive
                       ? "bg-primary/10 text-primary"
                       : "text-muted-foreground hover:bg-accent/10 hover:text-foreground",
                   )
                 }
               >
+                {Icon && <Icon className="size-3.5" />}
                 {label}
               </NavLink>
             ))}

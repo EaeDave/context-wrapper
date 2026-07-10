@@ -8,6 +8,7 @@ import JobPage from "@/pages/JobPage"
 import MeetingDetailPage from "@/pages/MeetingDetailPage"
 import SpeakersPage from "@/pages/SpeakersPage"
 import SettingsPage from "@/pages/SettingsPage"
+import TasksPage from "@/pages/TasksPage"
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -30,6 +31,7 @@ export default function App() {
             <Route path="meetings/:id" element={<MeetingDetailPage />} />
             <Route path="speakers" element={<SpeakersPage />} />
             <Route path="settings" element={<SettingsPage />} />
+            <Route path="tasks" element={<TasksPage />} />
           </Route>
         </Routes>
       </BrowserRouter>

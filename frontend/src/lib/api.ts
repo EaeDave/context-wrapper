@@ -9,6 +9,8 @@ import type {
   ProbeResult,
   SettingsInfo,
   AuthorizeResult,
+  ActionItem,
+  Task,
 } from "./types"
 
 async function request<T>(
@@ -129,3 +131,36 @@ export const anthropicExchange = (
 
 export const anthropicDisconnect = (): Promise<{ ok: true }> =>
   request("DELETE", "/api/auth/anthropic")
+
+export const updateActionItem = (
+  id: number,
+  patch: Partial<{ what: string; where: string | null; details: string | null; requested_by: string | null; priority: ActionItem["priority"]; status: ActionItem["status"]; due: string | null }>,
+): Promise<{ ok: true }> =>
+  request("PATCH", `/api/action-items/${id}`, patch)
+
+export const addActionItem = (
+  meetingId: number,
+  item: { what: string; where?: string | null; details?: string | null; requested_by?: string | null; priority?: ActionItem["priority"] },
+): Promise<{ id: number }> =>
+  request("POST", `/api/meetings/${meetingId}/action-items`, item)
+
+export const deleteActionItem = (id: number): Promise<void> =>
+  request("DELETE", `/api/action-items/${id}`)
+
+export const getTasks = (status = "aberto"): Promise<Task[]> =>
+  request("GET", `/api/tasks?status=${encodeURIComponent(status)}`)
+
+export const updateTurn = (
+  meetingId: number,
+  body: { seg_ids: number[]; text?: string; speaker?: string },
+): Promise<{ ok: true }> =>
+  request("PATCH", `/api/meetings/${meetingId}/turn`, body)
+
+export const reprocessMeeting = (
+  meetingId: number,
+  body: { mic_track?: number; others_track?: number; no_llm?: boolean },
+): Promise<Job> =>
+  request("POST", `/api/meetings/${meetingId}/reprocess`, body)
+
+export const reextractMeeting = (meetingId: number): Promise<Job> =>
+  request("POST", `/api/meetings/${meetingId}/reextract`)

@@ -173,6 +173,41 @@ class JobManager:
                 job.result_path = str(out)
             return
 
+        if job.kind == "reprocess":
+            from ..pipeline import reprocess_meeting
+
+            meeting_id = int(job.params["meeting_id"])
+            result = reprocess_meeting(
+                meeting_id,
+                settings=settings,
+                store=store,
+                mic_track=int(job.params.get("mic_track", 1)),
+                others_track=int(job.params.get("others_track", 2)),
+                no_llm=bool(job.params.get("no_llm", False)),
+                on_progress=progress,
+            )
+            row = store._conn.execute(
+                "SELECT md_path FROM meetings WHERE id = ?", (meeting_id,)
+            ).fetchone()
+            with self._lock:
+                job.meeting_id = meeting_id
+                job.result_path = row["md_path"] if row else None
+            return
+
+        if job.kind == "reextract":
+            from ..pipeline import reextract_meeting
+
+            meeting_id = int(job.params["meeting_id"])
+            reextract_meeting(
+                meeting_id,
+                settings=settings,
+                store=store,
+                on_progress=progress,
+            )
+            with self._lock:
+                job.meeting_id = meeting_id
+            return
+
         raise ValueError(f"kind desconhecido: {job.kind}")
 
 
