@@ -216,9 +216,12 @@ def create_app() -> FastAPI:
         *,
         kind: str,
         force: bool,
+        quality: str = "web",
     ) -> FileResponse:
         """Gera (se preciso) e serve preview de vídeo ou mix de áudio."""
         from ..audio import (
+            PREVIEW_FULL,
+            PREVIEW_WEB,
             ensure_listen_mix,
             ensure_listen_preview,
             listen_mix_path,
@@ -234,19 +237,20 @@ def create_app() -> FastAPI:
         if kind == "preview":
             has_video = probe_video_streams(source) >= 1
             if not has_video:
-                # Áudio puro — endpoint de preview cai no mix
                 kind = "audio"
             else:
-                preferred = listen_preview_path(source)
-                fallback = listen_dir / f"{meeting_id}.listen.mp4"
+                q = quality if quality in (PREVIEW_WEB, PREVIEW_FULL) else PREVIEW_WEB
+                preferred = listen_preview_path(source, q)
+                suffix = "full.mp4" if q == PREVIEW_FULL else "mp4"
+                fallback = listen_dir / f"{meeting_id}.listen.{suffix}"
                 try:
                     path = ensure_listen_preview(
-                        source, force=force, output_path=preferred
+                        source, force=force, output_path=preferred, quality=q
                     )
                 except Exception:
                     try:
                         path = ensure_listen_preview(
-                            source, force=force, output_path=fallback
+                            source, force=force, output_path=fallback, quality=q
                         )
                     except Exception as exc:
                         raise HTTPException(
@@ -279,7 +283,14 @@ def create_app() -> FastAPI:
 
     @app.get("/meetings/{meeting_id}", response_class=HTMLResponse)
     def meeting_detail(request: Request, meeting_id: int) -> HTMLResponse:
-        from ..audio import listen_mix_path, listen_preview_path, probe_video_streams
+        from ..audio import (
+            PREVIEW_FULL,
+            PREVIEW_WEB,
+            listen_mix_path,
+            listen_preview_path,
+            probe_video_size,
+            probe_video_streams,
+        )
 
         settings, store = _settings_store()
         result = store.get_meeting(meeting_id)
@@ -291,14 +302,26 @@ def create_app() -> FastAPI:
         source_exists = source.is_file()
         has_video = False
         preview_ready = False
+        preview_full_ready = False
         mix_ready = False
+        source_w, source_h = 0, 0
         if source_exists:
             try:
                 has_video = probe_video_streams(source) >= 1
+                if has_video:
+                    source_w, source_h = probe_video_size(source)
             except Exception:
                 has_video = False
-            preview_ready = has_video and listen_preview_path(source).is_file()
+            preview_ready = has_video and listen_preview_path(
+                source, PREVIEW_WEB
+            ).is_file()
+            preview_full_ready = has_video and listen_preview_path(
+                source, PREVIEW_FULL
+            ).is_file()
             mix_ready = listen_mix_path(source).is_file()
+        # Labels do seletor Plyr (size = altura aproximada)
+        web_h = min(720, source_h) if source_h else 720
+        full_h = source_h or 1080
         return render(
             request,
             "meeting.html",
@@ -309,7 +332,12 @@ def create_app() -> FastAPI:
             source_exists=source_exists,
             has_video=has_video,
             preview_ready=preview_ready,
+            preview_full_ready=preview_full_ready,
             mix_ready=mix_ready,
+            source_w=source_w,
+            source_h=source_h,
+            quality_web_h=web_h,
+            quality_full_h=full_h,
             md_path=getattr(result, "md_path", None),
         )
 
@@ -317,11 +345,21 @@ def create_app() -> FastAPI:
     def meeting_preview(
         meeting_id: int,
         force: Annotated[bool, Query()] = False,
+        q: Annotated[str, Query()] = "full",
         v: Annotated[str | None, Query()] = None,  # cache-bust opcional
     ) -> FileResponse:
-        """Vídeo + mic/desktop misturados (mp4). Sem vídeo, devolve só áudio."""
-        del v  # só query string
-        return _serve_listen_file(meeting_id, kind="preview", force=force)
+        """Vídeo + mic/desktop misturados (mp4).
+
+        ``q=full`` (default): resolução original, re-encoded p/ browser.
+        ``q=web``: ≤1280px, mais leve.
+        """
+        del v
+        from ..audio import _normalize_quality
+
+        quality = _normalize_quality(q)
+        return _serve_listen_file(
+            meeting_id, kind="preview", force=force, quality=quality
+        )
 
     @app.get("/meetings/{meeting_id}/audio")
     def meeting_audio(

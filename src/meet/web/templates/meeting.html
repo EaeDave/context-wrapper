@@ -39,8 +39,11 @@
       <p class="player-label">
         {% if has_video %}
           Vídeo + mic e desktop misturados
-          {% if not preview_ready %}
-            <span class="player-hint">· primeira vez gera preview (alguns segundos)</span>
+          {% if source_w and source_h %}
+            <span class="player-hint">· fonte {{ source_w }}×{{ source_h }}</span>
+          {% endif %}
+          {% if not preview_full_ready %}
+            <span class="player-hint">· 1ª vez na qualidade original pode levar alguns segundos</span>
           {% endif %}
         {% else %}
           Só áudio (arquivo sem vídeo)
@@ -57,10 +60,21 @@
             controls
             preload="metadata"
             crossorigin="anonymous"
+            data-full-src="/meetings/{{ meeting_id }}/preview?q=full&amp;v={{ meeting_id }}"
+            data-web-src="/meetings/{{ meeting_id }}/preview?q=web&amp;v={{ meeting_id }}"
+            data-full-h="{{ quality_full_h }}"
+            data-web-h="{{ quality_web_h }}"
           >
+            {# Default: qualidade original; Plyr adiciona o seletor web/full #}
             <source
-              src="/meetings/{{ meeting_id }}/preview?v={{ meeting_id }}"
+              src="/meetings/{{ meeting_id }}/preview?q=full&amp;v={{ meeting_id }}"
               type="video/mp4"
+              size="{{ quality_full_h }}"
+            />
+            <source
+              src="/meetings/{{ meeting_id }}/preview?q=web&amp;v={{ meeting_id }}"
+              type="video/mp4"
+              size="{{ quality_web_h }}"
             />
           </video>
         {% else %}
@@ -160,10 +174,16 @@
       if (!media || typeof Plyr === "undefined") return;
 
       var isVideo = media.tagName.toLowerCase() === "video";
+      var fullH = parseInt(media.dataset.fullH || "1080", 10);
+      var webH = parseInt(media.dataset.webH || "720", 10);
+      var fullSrc = media.dataset.fullSrc;
+      var webSrc = media.dataset.webSrc;
+
       var player = new Plyr(media, {
         iconUrl: "/static/plyr.svg",
         blankVideo: "",
-        ratio: isVideo ? "16:9" : undefined,
+        // ultrawide OBS (21:9) — deixa o Plyr usar a proporção real
+        ratio: isVideo ? null : undefined,
         controls: isVideo
           ? [
               "play-large",
@@ -177,21 +197,41 @@
               "fullscreen",
             ]
           : ["play", "progress", "current-time", "duration", "mute", "volume"],
-        settings: ["speed"],
+        settings: isVideo ? ["quality", "speed"] : ["speed"],
+        quality: isVideo
+          ? {
+              default: fullH,
+              options: [fullH, webH].filter(function (v, i, a) {
+                return a.indexOf(v) === i;
+              }),
+              forced: true,
+              onChange: null,
+            }
+          : undefined,
         speed: { selected: 1, options: [0.75, 1, 1.25, 1.5, 2] },
         keyboard: { focused: true, global: false },
         tooltips: { controls: true, seek: true },
         invertTime: false,
       });
 
+      if (isVideo && fullSrc && webSrc) {
+        player.source = {
+          type: "video",
+          sources: [
+            { src: fullSrc, type: "video/mp4", size: fullH },
+            { src: webSrc, type: "video/mp4", size: webH },
+          ],
+        };
+      }
+
       var retried = false;
       player.on("error", function () {
         if (errEl) {
           errEl.hidden = false;
           errEl.textContent =
-            "Falha ao carregar mídia. Tentando regenerar o preview…";
+            "Falha na qualidade atual. Tentando versão leve (web)…";
         }
-        if (retried) {
+        if (retried || !isVideo || !webSrc) {
           if (errEl) {
             errEl.textContent =
               "Não foi possível tocar. Use “Baixar preview” ou “Remixar”.";
@@ -199,18 +239,12 @@
           return;
         }
         retried = true;
-        var src = media.querySelector("source");
-        if (!src) return;
-        var url = src.getAttribute("src") || "";
-        if (url.indexOf("force=1") === -1) {
-          url += (url.indexOf("?") >= 0 ? "&" : "?") + "force=1";
-          src.setAttribute("src", url);
-          media.load();
-          player.source = {
-            type: isVideo ? "video" : "audio",
-            sources: [{ src: url, type: isVideo ? "video/mp4" : "audio/mp4" }],
-          };
-        }
+        // Fallback: qualidade web + force regenerate
+        var url = webSrc + (webSrc.indexOf("?") >= 0 ? "&" : "?") + "force=1";
+        player.source = {
+          type: "video",
+          sources: [{ src: url, type: "video/mp4", size: webH }],
+        };
       });
     })();
   </script>

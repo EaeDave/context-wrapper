@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 
 from meet.audio import (
+    PREVIEW_FULL,
+    PREVIEW_WEB,
     ensure_listen_mix,
     ensure_listen_preview,
     export_listen_mix,
@@ -26,6 +28,7 @@ from meet.audio import (
     listen_mix_path,
     listen_preview_path,
     prepare,
+    probe_video_size,
     probe_video_streams,
 )
 
@@ -272,7 +275,7 @@ def test_export_listen_preview_has_video_and_one_audio(tmp_path: Path) -> None:
     _make_video_two_audio_mkv(src)
     assert probe_video_streams(src) == 1
 
-    out = export_listen_preview(src)
+    out = export_listen_preview(src, quality=PREVIEW_WEB)
     assert out == tmp_path / "obs.listen.mp4"
     assert out.exists()
     assert probe_video_streams(out) == 1
@@ -300,12 +303,22 @@ def test_export_listen_preview_has_video_and_one_audio(tmp_path: Path) -> None:
     assert int(v.get("width", 9999)) <= 1280
 
 
+def test_export_listen_preview_full_keeps_resolution(tmp_path: Path) -> None:
+    src = tmp_path / "obs.mkv"
+    _make_video_two_audio_mkv(src)  # 320x240 test fixture
+    sw, sh = probe_video_size(src)
+    out = export_listen_preview(src, quality=PREVIEW_FULL, max_width=0)
+    assert out == tmp_path / "obs.listen.full.mp4"
+    ow, oh = probe_video_size(out)
+    assert ow == sw and oh == sh
+
+
 def test_ensure_listen_preview_caches(tmp_path: Path) -> None:
     src = tmp_path / "obs.mkv"
     _make_video_two_audio_mkv(src)
-    first = ensure_listen_preview(src)
+    first = ensure_listen_preview(src, quality=PREVIEW_WEB)
     mtime = first.stat().st_mtime
-    second = ensure_listen_preview(src)
+    second = ensure_listen_preview(src, quality=PREVIEW_WEB)
     assert second == first
     assert second.stat().st_mtime == mtime
 
@@ -320,3 +333,7 @@ def test_ensure_listen_preview_audio_only_falls_back(tmp_path: Path) -> None:
 
 def test_listen_preview_path_naming(tmp_path: Path) -> None:
     assert listen_preview_path(tmp_path / "x.mkv") == tmp_path / "x.listen.mp4"
+    assert (
+        listen_preview_path(tmp_path / "x.mkv", PREVIEW_FULL)
+        == tmp_path / "x.listen.full.mp4"
+    )

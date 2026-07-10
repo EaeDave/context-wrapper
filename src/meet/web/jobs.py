@@ -131,15 +131,32 @@ class JobManager:
             return
 
         if job.kind == "mix":
-            from ..audio import ensure_listen_mix, ensure_listen_preview
+            from ..audio import (
+                PREVIEW_FULL,
+                PREVIEW_WEB,
+                ensure_listen_mix,
+                ensure_listen_preview,
+            )
 
             video = Path(job.params["video"])
             mic = int(job.params.get("mic_track", 1))
             others = int(job.params.get("others_track", 2))
-            progress("Gerando preview (vídeo + áudio)…")
+            progress("Gerando preview original (full)…")
             try:
                 out = ensure_listen_preview(
-                    video, force=True, mic_track=mic, others_track=others
+                    video,
+                    force=True,
+                    mic_track=mic,
+                    others_track=others,
+                    quality=PREVIEW_FULL,
+                )
+                progress("Gerando preview leve (web)…")
+                ensure_listen_preview(
+                    video,
+                    force=True,
+                    mic_track=mic,
+                    others_track=others,
+                    quality=PREVIEW_WEB,
                 )
             except Exception:
                 progress("Sem vídeo — gerando só áudio…")
@@ -147,7 +164,6 @@ class JobManager:
                     video, force=True, mic_track=mic, others_track=others
                 )
             else:
-                # Cache de áudio puro também (download “Só áudio”)
                 progress("Gerando mix só de áudio…")
                 ensure_listen_mix(
                     video, force=True, mic_track=mic, others_track=others

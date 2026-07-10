@@ -128,9 +128,26 @@ def listen_mix_path(input_path: Path) -> Path:
     return input_path.with_name(f"{input_path.stem}.listen.m4a")
 
 
-def listen_preview_path(input_path: Path) -> Path:
-    """Path padrão do preview (vídeo + áudio misturado) ao lado da gravação."""
+# Qualidades de preview pro player (Plyr quality menu).
+# web  = leve (≤1280px) | full = resolução original (ainda re-encoded p/ browser)
+PREVIEW_WEB = "web"
+PREVIEW_FULL = "full"
+_PREVIEW_MAX_WIDTH = {PREVIEW_WEB: 1280, PREVIEW_FULL: 0}  # 0 = sem downscale
+
+
+def listen_preview_path(input_path: Path, quality: str = PREVIEW_WEB) -> Path:
+    """Path do preview: ``.listen.mp4`` (web) ou ``.listen.full.mp4`` (original)."""
+    q = _normalize_quality(quality)
+    if q == PREVIEW_FULL:
+        return input_path.with_name(f"{input_path.stem}.listen.full.mp4")
     return input_path.with_name(f"{input_path.stem}.listen.mp4")
+
+
+def _normalize_quality(quality: str) -> str:
+    q = (quality or PREVIEW_WEB).strip().lower()
+    if q in ("full", "orig", "original", "source", "0"):
+        return PREVIEW_FULL
+    return PREVIEW_WEB
 
 
 def probe_video_streams(input_path: Path) -> int:
@@ -147,6 +164,24 @@ def probe_video_streams(input_path: Path) -> int:
         raise RuntimeError(f"ffprobe falhou ao listar vídeo: {proc.stderr[:500]}")
     data = json.loads(proc.stdout)
     return len(data.get("streams", []))
+
+
+def probe_video_size(input_path: Path) -> tuple[int, int]:
+    """(width, height) do primeiro stream de vídeo; (0, 0) se não houver."""
+    cmd = [
+        "ffprobe", "-v", "quiet",
+        "-print_format", "json",
+        "-show_streams",
+        "-select_streams", "v:0",
+        str(input_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        return 0, 0
+    streams = json.loads(proc.stdout).get("streams") or []
+    if not streams:
+        return 0, 0
+    return int(streams[0].get("width") or 0), int(streams[0].get("height") or 0)
 
 
 def _cache_is_fresh(out: Path, source: Path) -> bool:
@@ -181,8 +216,8 @@ def ensure_listen_mix(
     )
 
 
-def _preview_is_browser_safe(path: Path) -> bool:
-    """True se o mp4 já é H.264 Main/Baseline e largura ≤ 1280 (cache bom)."""
+def _preview_is_browser_safe(path: Path, quality: str = PREVIEW_WEB) -> bool:
+    """True se o mp4 é re-encode browser-safe (não o High@L5.1 copy do OBS)."""
     try:
         cmd = [
             "ffprobe", "-v", "quiet",
@@ -198,20 +233,17 @@ def _preview_is_browser_safe(path: Path) -> bool:
         if not streams:
             return False
         v = streams[0]
+        if v.get("codec_name") != "h264":
+            return False
         profile = (v.get("profile") or "").lower()
         width = int(v.get("width") or 0)
-        level = int(v.get("level") or 0)
-        # High@L5.x 2560px = cache antigo (copy) que quebra o <video>
-        if width > 1280:
+        # Só aceitamos Main/Baseline — o copy quebrado do OBS era High@L5.1
+        if "main" not in profile and "baseline" not in profile:
             return False
-        if level >= 51:  # 5.1+
+        q = _normalize_quality(quality)
+        if q == PREVIEW_WEB and width > 1280:
             return False
-        if "high" in profile and "constrained" not in profile:
-            # Main/Baseline preferidos; High 720/1080 costuma ok, mas
-            # rejeitamos High vindo do copy antigo (geralmente L5.1 wide)
-            if width > 960:
-                return False
-        return v.get("codec_name") == "h264"
+        return True
     except Exception:
         return False
 
@@ -223,13 +255,15 @@ def ensure_listen_preview(
     mic_track: int = 1,
     others_track: int = 2,
     output_path: Path | None = None,
+    quality: str = PREVIEW_WEB,
 ) -> Path:
-    """Retorna o .listen.mp4 (vídeo + tracks misturadas), gerando se faltar.
+    """Retorna preview mp4 (web ou full), gerando se faltar.
 
     Sem stream de vídeo no arquivo-fonte, cai no mix só de áudio (.listen.m4a).
-    Invalida cache antigo (copy High@L5.1 full-res) que o browser não toca.
+    Invalida cache antigo (copy High@L5.1) que o browser não toca.
     """
     input_path = Path(input_path)
+    q = _normalize_quality(quality)
     if probe_video_streams(input_path) < 1:
         return ensure_listen_mix(
             input_path,
@@ -237,18 +271,21 @@ def ensure_listen_preview(
             mic_track=mic_track,
             others_track=others_track,
         )
-    out = Path(output_path) if output_path else listen_preview_path(input_path)
+    out = Path(output_path) if output_path else listen_preview_path(input_path, q)
     if (
         not force
         and _cache_is_fresh(out, input_path)
-        and _preview_is_browser_safe(out)
+        and _preview_is_browser_safe(out, q)
     ):
         return out
+    max_w = _PREVIEW_MAX_WIDTH[q]
     return export_listen_preview(
         input_path,
         out,
         mic_track=mic_track,
         others_track=others_track,
+        max_width=max_w,
+        quality=q,
     )
 
 
@@ -259,32 +296,43 @@ def export_listen_preview(
     mic_track: int = 1,
     others_track: int = 2,
     max_width: int = 1280,
+    quality: str = PREVIEW_WEB,
 ) -> Path:
-    """Gera mp4 browser-safe: vídeo H.264 Main + áudio mic/desktop misturados.
+    """Gera mp4 browser-safe: H.264 Main + áudio mic/desktop misturados.
 
-    Não usa ``-c:v copy``: gravações OBS em 2560×1080@60 High@L5.1 falham
-    em vários browsers (Chrome/Firefox no Linux). Re-encode leve +
-    ``faststart`` garante seek e decode no ``<video>`` embutido.
+    Não usa ``-c:v copy``: o bitstream OBS High@L5.1 2560×1080@60 falha em
+    vários browsers. Re-encode + ``faststart``.
+
+    - ``max_width > 0``: limita largura (qualidade web / 720p-ish)
+    - ``max_width == 0``: mantém resolução original (qualidade full)
     """
     n_audio = probe_audio_streams(input_path)
     if probe_video_streams(input_path) < 1:
         raise RuntimeError("Arquivo sem stream de vídeo — use export_listen_mix")
 
+    q = _normalize_quality(quality)
     if output_path is None:
-        output_path = listen_preview_path(input_path)
+        output_path = listen_preview_path(input_path, q)
     output_path = Path(output_path)
 
-    # scale só se for maior que max_width; yuv420p + Main@L4.0 = universal
-    vf = f"scale='min({max_width},iw)':-2"
+    # full = sem downscale, só garante yuv420p; web = scale ≤ max_width
+    if max_width and max_width > 0:
+        vf = f"scale='min({max_width},iw)':-2,format=yuv420p"
+        crf, level, abitrate = "22", "4.0", "160k"
+    else:
+        vf = "format=yuv420p"
+        # original res @60fps precisa L5.1; Main profile ainda é browser-ok
+        crf, level, abitrate = "18", "5.1", "192k"
+
     video_audio_out = [
         "-c:v", "libx264",
         "-preset", "veryfast",
-        "-crf", "22",
+        "-crf", crf,
         "-profile:v", "main",
-        "-level", "4.0",
+        "-level", level,
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
-        "-b:a", "160k",
+        "-b:a", abitrate,
         "-movflags", "+faststart",
         str(output_path),
     ]
@@ -301,7 +349,6 @@ def export_listen_preview(
 
     mic_idx = mic_track - 1
     others_idx = others_track - 1
-    # amix + scale no mesmo filter graph
     filter_str = (
         f"[0:v:0]{vf}[v];"
         f"[0:a:{mic_idx}][0:a:{others_idx}]"
