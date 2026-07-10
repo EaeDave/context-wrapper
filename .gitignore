@@ -4,6 +4,10 @@ __pycache__/
 .pytest_cache/
 *.pyc
 
+# Frontend (build gerado por: cd frontend && bun run build)
+node_modules/
+src/meet/web/dist/
+
 # Gravações / áudio — NUNCA commitar (conteúdo privado de reuniões)
 *.mp4
 *.mkv

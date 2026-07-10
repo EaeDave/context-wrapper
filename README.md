@@ -115,16 +115,25 @@ tracks separadas do mkv original.
 
 ### Interface web
 
-UI local minimalista: listar reuniões, processar gravações, acompanhar jobs,
-ver transcript/action items, nomear falantes, buscar no histórico.
-Player embutido com [Plyr](https://github.com/sampotts/plyr) (vendored, offline)
-— vídeo + tracks misturadas, ou só áudio.
+UI local em **React + Tailwind + shadcn/ui** (SPA servida pelo FastAPI): listar
+reuniões, processar gravações, acompanhar jobs em tempo real (SSE), ver
+transcript com seek no player, action items, nomear falantes, busca no
+histórico (inline + paleta `Ctrl+K`).
+
+O frontend precisa ser compilado uma vez (e a cada mudança em `frontend/`):
+
+```sh
+cd frontend && bun install && bun run build   # gera src/meet/web/dist/
+```
 
 ```sh
 uv run meet serve            # http://127.0.0.1:8741 (abre o browser)
 uv run meet serve --no-open  # só sobe o servidor
 uv run meet serve -p 9000    # outra porta
 ```
+
+Dev do frontend com hot-reload: `cd frontend && bun run dev` (proxy pra API em
+`127.0.0.1:8741` — suba o `meet serve` junto).
 
 Só escuta em `127.0.0.1` por padrão (dados de reunião ficam na máquina).
 
