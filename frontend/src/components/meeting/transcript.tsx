@@ -61,9 +61,15 @@ export function Transcript({
   const [speakerFree, setSpeakerFree] = useState("")
   const [textValue, setTextValue] = useState("")
 
-  const activeIndex = groups.findIndex(
-    (g) => currentTime >= g.start && currentTime < g.end,
-  )
+  // Turno ativo = último turno já iniciado (start <= currentTime). Contenção
+  // [start,end) falha: mic ("me") e desktop são transcritos em separado e seus
+  // tempos se sobrepõem — um turno "me" longo engloba vários turnos de outro
+  // falante, prendendo o destaque no "me". Grupos vêm ordenados por start.
+  let activeIndex = -1
+  for (let i = 0; i < groups.length; i++) {
+    if (groups[i].start <= currentTime) activeIndex = i
+    else break
+  }
 
   useEffect(() => {
     if (autoScroll && activeIndex >= 0 && activeRef.current) {
