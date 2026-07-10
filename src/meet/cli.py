@@ -191,9 +191,13 @@ def serve(
             + (f" (pid {busy})" if busy > 0 else "")
             + "."
         )
+        if busy and busy > 0:
+            kill_hint = f"kill {busy}"
+        else:
+            kill_hint = f"fuser -k {port}/tcp"
         err_console.print(
-            f"[dim]Encerre o processo antigo e tente de novo:[/dim]\n"
-            f"  kill {busy if busy and busy > 0 else '$(ss -ltnp sport = :' + str(port) + \" | rg -o 'pid=[0-9]+' | head -1 | cut -d= -f2)\"}\n"
+            "[dim]Encerre o processo antigo e tente de novo:[/dim]\n"
+            f"  {kill_hint}\n"
             f"  # ou outra porta: uv run meet serve -p {port + 1}"
         )
         raise typer.Exit(1)
