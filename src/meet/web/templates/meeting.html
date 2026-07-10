@@ -179,10 +179,56 @@
       var fullSrc = media.dataset.fullSrc;
       var webSrc = media.dataset.webSrc;
 
+      function clearError() {
+        if (errEl) {
+          errEl.hidden = true;
+          errEl.textContent = "";
+        }
+      }
+
+      function showError(msg) {
+        if (!errEl) return;
+        errEl.hidden = false;
+        errEl.textContent = msg;
+      }
+
+      // Só mostra erro se a mídia continuar sem dados depois de um tempo.
+      // O Plyr dispara "error" em troca de source/qualidade mesmo quando
+      // o vídeo acaba tocando — por isso a mensagem falsa.
+      var fatalTimer = null;
+      function scheduleFatalCheck() {
+        if (fatalTimer) clearTimeout(fatalTimer);
+        fatalTimer = setTimeout(function () {
+          var el = player.media || media;
+          var ok =
+            el &&
+            el.readyState >= 2 &&
+            isFinite(el.duration) &&
+            el.duration > 0;
+          if (ok) {
+            clearError();
+            return;
+          }
+          // Ainda sem dados: tenta fallback web uma vez
+          if (!retried && isVideo && webSrc) {
+            retried = true;
+            showError("Qualidade original falhou — tentando versão leve…");
+            player.source = {
+              type: "video",
+              sources: [{ src: webSrc, type: "video/mp4", size: webH }],
+            };
+            scheduleFatalCheck();
+            return;
+          }
+          showError(
+            "Não foi possível tocar. Use “Baixar preview” ou “Remixar”."
+          );
+        }, 2500);
+      }
+
       var player = new Plyr(media, {
         iconUrl: "/static/plyr.svg",
         blankVideo: "",
-        // ultrawide OBS (21:9) — deixa o Plyr usar a proporção real
         ratio: isVideo ? null : undefined,
         controls: isVideo
           ? [
@@ -205,7 +251,6 @@
                 return a.indexOf(v) === i;
               }),
               forced: true,
-              onChange: null,
             }
           : undefined,
         speed: { selected: 1, options: [0.75, 1, 1.25, 1.5, 2] },
@@ -225,26 +270,14 @@
       }
 
       var retried = false;
+
+      ["loadeddata", "canplay", "playing", "timeupdate"].forEach(function (ev) {
+        player.on(ev, clearError);
+      });
+
       player.on("error", function () {
-        if (errEl) {
-          errEl.hidden = false;
-          errEl.textContent =
-            "Falha na qualidade atual. Tentando versão leve (web)…";
-        }
-        if (retried || !isVideo || !webSrc) {
-          if (errEl) {
-            errEl.textContent =
-              "Não foi possível tocar. Use “Baixar preview” ou “Remixar”.";
-          }
-          return;
-        }
-        retried = true;
-        // Fallback: qualidade web + force regenerate
-        var url = webSrc + (webSrc.indexOf("?") >= 0 ? "&" : "?") + "force=1";
-        player.source = {
-          type: "video",
-          sources: [{ src: url, type: "video/mp4", size: webH }],
-        };
+        // Não assume falha definitiva — espera ver se o stream recupera
+        scheduleFatalCheck();
       });
     })();
   </script>
