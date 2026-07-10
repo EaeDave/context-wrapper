@@ -17,10 +17,12 @@ import {
   RefreshCcw,
   Wand2,
   Fingerprint,
+  Copy,
 } from "lucide-react"
 import type { MeetingDetail } from "@/lib/types"
 import * as api from "@/lib/api"
 import { formatDuration } from "@/lib/format"
+import { copyToClipboard } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -260,10 +262,28 @@ function MeetingHeader({ meeting, onRename, onDelete, onRemix, onReextract, onRe
 
 // ─── Summary card ─────────────────────────────────────────────────────────────
 function SummaryCard({ summary }: { summary: string }) {
+  async function handleCopy() {
+    const ok = await copyToClipboard(summary)
+    if (ok) toast.success("Resumo copiado")
+    else toast.error("Não foi possível copiar")
+  }
+
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle className="text-base">Resumo</CardTitle>
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base">Resumo</CardTitle>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7 text-muted-foreground hover:text-foreground"
+            onClick={handleCopy}
+            title="Copiar resumo"
+          >
+            <Copy className="size-3.5" />
+            <span className="sr-only">Copiar resumo</span>
+          </Button>
+        </div>
       </CardHeader>
       <CardContent>
         <p className="whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground">

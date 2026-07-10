@@ -1,9 +1,10 @@
 import { useState } from "react"
-import { ClipboardList, Pencil, Plus, Trash2 } from "lucide-react"
+import { ClipboardList, Copy, Pencil, Plus, Trash2 } from "lucide-react"
 import { useQueryClient, useMutation } from "@tanstack/react-query"
 import { toast } from "sonner"
 import type { ActionItem, MeetingDetail } from "@/lib/types"
 import * as api from "@/lib/api"
+import { copyToClipboard } from "@/lib/utils"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -166,6 +167,20 @@ export function ActionItems({ meetingId, items }: ActionItemsProps) {
     setEditForm(itemToForm(item))
   }
 
+  async function handleCopy() {
+    if (items.length === 0) return
+    const lines = items.map((it) => {
+      const check = it.status === "feito" ? "[x]" : "[ ]"
+      let line = `- ${check} ${it.what}`
+      if (it.where) line += ` (onde: ${it.where})`
+      if (it.details) line += ` — ${it.details}`
+      return line
+    })
+    const ok = await copyToClipboard(lines.join("\n"))
+    if (ok) toast.success("Action items copiados")
+    else toast.error("Não foi possível copiar")
+  }
+
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -174,18 +189,31 @@ export function ActionItems({ meetingId, items }: ActionItemsProps) {
             <ClipboardList className="size-4" />
             Action items
           </CardTitle>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 gap-1.5 text-xs"
-            onClick={() => {
-              setAddForm(emptyForm())
-              setAddOpen(true)
-            }}
-          >
-            <Plus className="size-3.5" />
-            Adicionar tarefa
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7 text-muted-foreground hover:text-foreground"
+              onClick={handleCopy}
+              disabled={items.length === 0}
+              title="Copiar action items"
+            >
+              <Copy className="size-3.5" />
+              <span className="sr-only">Copiar action items</span>
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1.5 text-xs"
+              onClick={() => {
+                setAddForm(emptyForm())
+                setAddOpen(true)
+              }}
+            >
+              <Plus className="size-3.5" />
+              Adicionar tarefa
+            </Button>
+          </div>
         </div>
       </CardHeader>
 

@@ -202,6 +202,10 @@ class TuningBody(BaseModel):
     device: str | None = None
     compute_type: str | None = None
 
+
+class TestConnectionBody(BaseModel):
+    target: str
+
 # Verifiers PKCE pendentes: {state → verifier}. Limpo após uso, max 5 entradas.
 _pending_verifiers: dict[str, str] = {}
 _MAX_PENDING = 5
@@ -905,6 +909,72 @@ def create_app() -> FastAPI:
         settings = load_settings()
         save_local_settings(patch, settings)
         return {"ok": True}
+
+    @app.post("/api/settings/test")
+    def api_test_connection(body: TestConnectionBody) -> dict:
+        """Testa conectividade por provider. Nunca vaza tokens; nunca retorna 500."""
+        import httpx
+
+        target = body.target.strip().lower()
+        settings = load_settings()
+
+        if target == "anthropic":
+            try:
+                from ..anthropic_oauth import get_access_token, load_tokens
+                get_access_token(settings)
+                tokens = load_tokens(settings)
+                email = (tokens or {}).get("email")
+                detail = f"Conectado ({email})" if email else "Conectado"
+                return {"ok": True, "detail": detail}
+            except Exception as exc:
+                return {"ok": False, "detail": str(exc)}
+
+        if target == "hf":
+            hf_token = settings.hf_token
+            if not hf_token:
+                return {"ok": False, "detail": "Token Hugging Face não configurado"}
+            try:
+                resp = httpx.get(
+                    "https://huggingface.co/api/whoami-v2",
+                    headers={"Authorization": f"Bearer {hf_token}"},
+                    timeout=10.0,
+                )
+                if resp.status_code == 200:
+                    name = resp.json().get("name", "")
+                    return {"ok": True, "detail": f"Token válido ({name})" if name else "Token válido"}
+                return {"ok": False, "detail": f"Token inválido (HTTP {resp.status_code})"}
+            except Exception as exc:
+                return {"ok": False, "detail": f"Erro de conexão: {exc}"}
+
+        if target == "openai":
+            api_key = settings.openai_api_key
+            if not api_key:
+                return {"ok": False, "detail": "OpenAI API key não configurada"}
+            try:
+                resp = httpx.get(
+                    "https://api.openai.com/v1/models",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=10.0,
+                )
+                if resp.status_code == 200:
+                    return {"ok": True, "detail": "Conectado"}
+                return {"ok": False, "detail": f"Chave inválida (HTTP {resp.status_code})"}
+            except Exception as exc:
+                return {"ok": False, "detail": f"Erro de conexão: {exc}"}
+
+        if target == "ollama":
+            url = (settings.ollama_url or "http://localhost:11434").rstrip("/")
+            try:
+                resp = httpx.get(f"{url}/api/tags", timeout=10.0)
+                if resp.status_code == 200:
+                    models = resp.json().get("models", [])
+                    n = len(models)
+                    return {"ok": True, "detail": f"{n} modelo{'s' if n != 1 else ''} disponível{'is' if n != 1 else ''}"}
+                return {"ok": False, "detail": f"Ollama respondeu HTTP {resp.status_code}"}
+            except Exception as exc:
+                return {"ok": False, "detail": f"Erro de conexão: {exc}"}
+
+        raise HTTPException(400, f"Target inválido: {target!r}. Válidos: anthropic, hf, openai, ollama")
 
     @app.post("/api/auth/anthropic/authorize")
     def api_authorize() -> dict:

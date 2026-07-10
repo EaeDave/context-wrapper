@@ -17,3 +17,6 @@ src/meet/web/dist/
 
 # Segredos locais
 .env
+
+# Artefatos do harness de agente
+omp-session-*.html

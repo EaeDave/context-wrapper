@@ -2,12 +2,13 @@ import { useState } from "react"
 import { Link } from "react-router"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
-import { CheckSquare2, ListTodo } from "lucide-react"
+import { CheckSquare2, Copy, ListTodo } from "lucide-react"
 import type { Task } from "@/lib/types"
 import * as api from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
-import { cn } from "@/lib/utils"
+import { cn, copyToClipboard } from "@/lib/utils"
 
 type FilterStatus = "aberto" | "feito" | "todos"
 
@@ -60,12 +61,34 @@ export default function TasksPage() {
     },
   })
 
+  async function handleCopy() {
+    if (tasks.length === 0) return
+    const lines = tasks.map((t) => {
+      const check = t.status === "feito" ? "[x]" : "[ ]"
+      return `- ${check} ${t.what} — ${t.meeting_title}`
+    })
+    const ok = await copyToClipboard(lines.join("\n"))
+    if (ok) toast.success("Tarefas copiadas")
+    else toast.error("Não foi possível copiar")
+  }
+
   return (
     <div className="mx-auto max-w-3xl">
       {/* Header */}
       <div className="mb-6 flex items-center gap-3">
         <ListTodo className="size-6 text-primary" />
         <h1 className="text-2xl font-semibold tracking-tight">Tarefas</h1>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="ml-auto size-8 text-muted-foreground hover:text-foreground"
+          onClick={handleCopy}
+          disabled={tasks.length === 0 || isLoading}
+          title="Copiar tarefas"
+        >
+          <Copy className="size-4" />
+          <span className="sr-only">Copiar tarefas</span>
+        </Button>
       </div>
 
       {/* Filter tabs */}

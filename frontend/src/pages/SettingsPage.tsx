@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
-import { Bot, Cpu, ExternalLink, Key, SlidersHorizontal } from "lucide-react"
+import { Bot, Cpu, ExternalLink, Key, Loader2, SlidersHorizontal } from "lucide-react"
 
 import * as api from "@/lib/api"
 import type { SettingsInfo } from "@/lib/types"
@@ -195,6 +195,17 @@ export default function SettingsPage() {
       toast.error("Erro ao salvar", { description: err.message }),
   })
 
+  // ── Testar conexão ────────────────────────────────────────────────────────
+  const testMutation = useMutation({
+    mutationFn: (target: string) => api.testConnection(target),
+    onSuccess: (data) => {
+      if (data.ok) toast.success("Conexão OK", { description: data.detail })
+      else toast.error("Falha na conexão", { description: data.detail })
+    },
+    onError: (err: Error) =>
+      toast.error("Erro ao testar conexão", { description: err.message }),
+  })
+
   // ── Render ────────────────────────────────────────────────────────────────
   if (isLoading) {
     return (
@@ -291,15 +302,27 @@ export default function SettingsPage() {
             </Button>
           </div>
 
-          <a
-            href="https://huggingface.co/settings/tokens"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <ExternalLink className="size-3" />
-            Obter token em huggingface.co
-          </a>
+          <div className="flex items-center justify-between">
+            <a
+              href="https://huggingface.co/settings/tokens"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <ExternalLink className="size-3" />
+              Obter token em huggingface.co
+            </a>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={testMutation.isPending}
+              onClick={() => testMutation.mutate("hf")}
+            >
+              {testMutation.isPending && testMutation.variables === "hf" ? (
+                <><Loader2 className="size-3.5 mr-1.5 animate-spin" />Testando…</>
+              ) : "Testar"}
+            </Button>
+          </div>
         </CardContent>
       </Card>
 
@@ -363,11 +386,23 @@ export default function SettingsPage() {
             </Button>
           )}
 
-          {settings?.anthropic.api_key_configured && (
-            <p className="text-xs text-muted-foreground">
-              Chave de API configurada — usada como fallback quando OAuth não está ativo.
-            </p>
-          )}
+          <div className="flex items-center justify-between gap-4">
+            {settings?.anthropic.api_key_configured ? (
+              <p className="text-xs text-muted-foreground">
+                Chave de API configurada — usada como fallback quando OAuth não está ativo.
+              </p>
+            ) : <span />}
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={testMutation.isPending}
+              onClick={() => testMutation.mutate("anthropic")}
+            >
+              {testMutation.isPending && testMutation.variables === "anthropic" ? (
+                <><Loader2 className="size-3.5 mr-1.5 animate-spin" />Testando…</>
+              ) : "Testar"}
+            </Button>
+          </div>
         </CardContent>
       </Card>
 
@@ -480,12 +515,25 @@ export default function SettingsPage() {
               />
             </div>
           </div>
-          <Button
-            onClick={() => saveLlm.mutate()}
-            disabled={!llmProvider || saveLlm.isPending}
-          >
-            Salvar
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              onClick={() => saveLlm.mutate()}
+              disabled={!llmProvider || saveLlm.isPending}
+            >
+              Salvar
+            </Button>
+            {llmProvider && llmProvider !== "claude-code" && (
+              <Button
+                variant="outline"
+                disabled={testMutation.isPending}
+                onClick={() => testMutation.mutate(llmProvider)}
+              >
+                {testMutation.isPending && testMutation.variables === llmProvider ? (
+                  <><Loader2 className="size-3.5 mr-1.5 animate-spin" />Testando…</>
+                ) : "Testar"}
+              </Button>
+            )}
+          </div>
         </CardContent>
       </Card>
 

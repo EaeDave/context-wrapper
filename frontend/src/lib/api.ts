@@ -183,3 +183,8 @@ export const setTuning = (patch: {
   compute_type?: string
 }): Promise<{ ok: true }> =>
   request("PUT", "/api/settings/tuning", patch)
+
+export const testConnection = (
+  target: string,
+): Promise<{ ok: boolean; detail: string }> =>
+  request("POST", "/api/settings/test", { target })
