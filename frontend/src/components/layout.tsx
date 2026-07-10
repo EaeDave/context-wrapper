@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react"
 import { NavLink, Outlet } from "react-router"
-import { Search } from "lucide-react"
+import { Search, Settings } from "lucide-react"
 import { Toaster } from "@/components/ui/sonner"
 import { cn } from "@/lib/utils"
 import SearchCommand from "@/components/search-command"
@@ -51,10 +51,23 @@ export default function Layout() {
               </NavLink>
             ))}
           </nav>
+          {/* Settings icon */}
+          <NavLink
+            to="/settings"
+            className={({ isActive }) =>
+              cn(
+                "ml-auto flex items-center gap-2 rounded-md border border-input bg-muted/40 px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent/10 hover:text-foreground",
+                isActive && "border-primary/40 bg-primary/10 text-primary",
+              )
+            }
+            title="Configurações"
+          >
+            <Settings className="size-4" />
+          </NavLink>
           {/* Command palette trigger */}
           <button
             onClick={() => setCommandOpen(true)}
-            className="ml-auto flex items-center gap-2 rounded-md border border-input bg-muted/40 px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent/10 hover:text-foreground"
+            className="flex items-center gap-2 rounded-md border border-input bg-muted/40 px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent/10 hover:text-foreground"
           >
             <Search className="size-4" />
             <span className="hidden sm:inline">Buscar</span>

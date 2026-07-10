@@ -104,3 +104,11 @@ export interface ProcessRequest {
   no_llm?: boolean
   import_media?: boolean
 }
+
+export interface SettingsInfo {
+  hf_token: { configured: boolean; masked: string | null; source: "local" | "config" | "env" | null }
+  anthropic: { connected: boolean; email: string | null; expires: number | null; api_key_configured: boolean }
+  llm: { provider: string; model: string }
+}
+
+export interface AuthorizeResult { url: string; state: string }

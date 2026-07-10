@@ -144,6 +144,56 @@ class ClaudeCodeProvider(LLMProvider):
         return proc.stdout
 
 
+class AnthropicOAuthProvider(LLMProvider):
+    """Provider usando token OAuth (sk-ant-oat…) — sem API key, via assinatura Claude."""
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+        self._model = settings.llm_model or "claude-sonnet-5"
+
+    def complete(self, system: str, user: str) -> str:
+        import httpx
+
+        from .anthropic_oauth import _check_response, get_access_token
+
+        access = get_access_token(self._settings)
+        headers = {
+            "Authorization": f"Bearer {access}",
+            "anthropic-beta": "oauth-2025-04-20,claude-code-20250219",
+            "anthropic-version": "2023-06-01",
+            "User-Agent": "claude-cli/2.0.0 (external, cli)",
+            "Content-Type": "application/json",
+        }
+        # system como lista de blocks — PRIMEIRO block é o spoof obrigatório.
+        system_blocks = [
+            {"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."},
+            {"type": "text", "text": system},
+        ]
+        payload = {
+            "model": self._model,
+            "max_tokens": 8192,
+            "system": system_blocks,
+            "messages": [{"role": "user", "content": user}],
+        }
+        with httpx.Client(timeout=300) as client:
+            resp = client.post(
+                "https://api.anthropic.com/v1/messages",
+                json=payload,
+                headers=headers,
+            )
+            _check_response(resp)
+        data = resp.json()
+        parts = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
+        if not parts:
+            blocks = [b.get("type") for b in data.get("content", [])]
+            raise RuntimeError(
+                f"Resposta sem bloco de texto (stop_reason={data.get('stop_reason')}, "
+                f"blocks={blocks})."
+            )
+        return "".join(parts)
+
+
+
 def get_provider(settings: Settings) -> LLMProvider:
     """Instancia o provider LLM configurado, validando credenciais."""
     provider = settings.llm_provider.lower()
@@ -153,13 +203,17 @@ def get_provider(settings: Settings) -> LLMProvider:
         return ClaudeCodeProvider(model)
 
     if provider == "anthropic":
-        if not settings.anthropic_api_key:
-            raise ValueError(
-                "anthropic_api_key não configurado. "
-                "Defina a variável de ambiente ANTHROPIC_API_KEY "
-                "ou adicione ao ~/.config/meet/config.toml."
-            )
-        return AnthropicProvider(settings.anthropic_api_key, model)
+        from .anthropic_oauth import load_tokens
+
+        if load_tokens(settings):
+            return AnthropicOAuthProvider(settings)
+        if settings.anthropic_api_key:
+            return AnthropicProvider(settings.anthropic_api_key, model)
+        raise ValueError(
+            "Provider 'anthropic' sem credenciais. "
+            "Acesse a página Configurações para conectar via OAuth "
+            "ou configure ANTHROPIC_API_KEY."
+        )
 
     if provider == "openai":
         if not settings.openai_api_key:

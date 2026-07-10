@@ -7,6 +7,8 @@ import type {
   Speaker,
   ProcessRequest,
   ProbeResult,
+  SettingsInfo,
+  AuthorizeResult,
 } from "./types"
 
 async function request<T>(
@@ -103,3 +105,27 @@ export const getSpeakers = (): Promise<Speaker[]> =>
 
 export const deleteSpeaker = (name: string): Promise<void> =>
   request("DELETE", `/api/speakers/${encodeURIComponent(name)}`)
+
+export const getSettings = (): Promise<SettingsInfo> =>
+  request("GET", "/api/settings")
+
+export const setHfToken = (token: string): Promise<{ ok: true }> =>
+  request("PUT", "/api/settings/hf-token", { token })
+
+export const deleteHfToken = (): Promise<{ ok: true }> =>
+  request("DELETE", "/api/settings/hf-token")
+
+export const setLlm = (provider: string, model: string): Promise<{ ok: true }> =>
+  request("PUT", "/api/settings/llm", { provider, model })
+
+export const anthropicAuthorize = (): Promise<AuthorizeResult> =>
+  request("POST", "/api/auth/anthropic/authorize")
+
+export const anthropicExchange = (
+  code: string,
+  state: string,
+): Promise<{ ok: true; email: string | null }> =>
+  request("POST", "/api/auth/anthropic/exchange", { code, state })
+
+export const anthropicDisconnect = (): Promise<{ ok: true }> =>
+  request("DELETE", "/api/auth/anthropic")

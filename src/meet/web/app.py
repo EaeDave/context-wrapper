@@ -6,6 +6,7 @@ import asyncio
 import json
 import mimetypes
 import re
+import time
 from pathlib import Path
 from typing import Annotated, AsyncGenerator
 
@@ -14,8 +15,16 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from ..config import load_settings
+from ..config import hf_token_source, load_settings, save_local_settings
 from ..store import Store
+from ..anthropic_oauth import (
+    build_authorize_url,
+    clear_tokens,
+    exchange_code,
+    generate_pkce,
+    load_tokens,
+    save_tokens,
+)
 from .jobs import Job, JobStatus, manager
 
 WEB_DIR = Path(__file__).resolve().parent
@@ -129,6 +138,25 @@ class ProcessBody(BaseModel):
 class BulkDeleteBody(BaseModel):
     ids: list[int]
 
+
+class HFTokenBody(BaseModel):
+    token: str
+
+
+class LLMSettingsBody(BaseModel):
+    provider: str
+    model: str
+
+
+class ExchangeBody(BaseModel):
+    code: str
+    state: str
+
+
+# Verifiers PKCE pendentes: {state → verifier}. Limpo após uso, max 5 entradas.
+_pending_verifiers: dict[str, str] = {}
+_MAX_PENDING = 5
+_VALID_LLM_PROVIDERS = frozenset({"claude-code", "anthropic", "openai", "ollama"})
 
 # ── App ──────────────────────────────────────────────────────────────────────
 
@@ -618,6 +646,122 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Arquivo não encontrado")
         media = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
         return FileResponse(p, media_type=media, filename=p.name)
+
+    # ── Settings + Auth ───────────────────────────────────────────────────────
+
+    @app.get("/api/settings")
+    def api_get_settings() -> dict:
+        """Retorna estado atual de configurações (sem segredos inteiros)."""
+        settings = load_settings()
+        tokens = load_tokens(settings)
+        hf = settings.hf_token
+        masked = (hf[:3] + "…" + hf[-4:]) if hf else None
+        source = hf_token_source(settings) if hf else None
+        return {
+            "hf_token": {
+                "configured": bool(hf),
+                "masked": masked,
+                "source": source,
+            },
+            "anthropic": {
+                "connected": bool(tokens),
+                "email": tokens.get("email") if tokens else None,
+                "expires": tokens.get("expires") if tokens else None,
+                "api_key_configured": bool(settings.anthropic_api_key),
+            },
+            "llm": {
+                "provider": settings.llm_provider,
+                "model": settings.llm_model,
+            },
+        }
+
+    @app.put("/api/settings/hf-token")
+    def api_put_hf_token(body: HFTokenBody) -> dict:
+        """Salva hf_token em settings.local.json."""
+        if not body.token.strip():
+            raise HTTPException(400, "Token vazio")
+        settings = load_settings()
+        save_local_settings({"hf_token": body.token.strip()}, settings)
+        return {"ok": True}
+
+    @app.delete("/api/settings/hf-token")
+    def api_delete_hf_token() -> dict:
+        """Remove override local do hf_token. 409 se a fonte é config.toml ou env."""
+        settings = load_settings()
+        src = hf_token_source(settings)
+        if src in ("config", "env"):
+            detail = (
+                f"Token definido na fonte '{src}' — não pode ser removido via UI. "
+                "Remova de ~/.config/meet/config.toml ou da variável de ambiente HF_TOKEN."
+            )
+            raise HTTPException(409, detail)
+        save_local_settings({"hf_token": None}, settings)
+        return {"ok": True}
+
+    @app.put("/api/settings/llm")
+    def api_put_llm(body: LLMSettingsBody) -> dict:
+        """Atualiza provider e model em settings.local.json."""
+        if body.provider not in _VALID_LLM_PROVIDERS:
+            raise HTTPException(
+                400,
+                f"Provider inválido: {body.provider!r}. "
+                f"Válidos: {sorted(_VALID_LLM_PROVIDERS)}",
+            )
+        settings = load_settings()
+        save_local_settings({"llm_provider": body.provider, "llm_model": body.model}, settings)
+        return {"ok": True}
+
+    @app.post("/api/auth/anthropic/authorize")
+    def api_authorize() -> dict:
+        """Gera URL de autorização OAuth com PKCE. Verifier fica em memória."""
+        import os as _os
+
+        state = _os.urandom(16).hex()
+        verifier, challenge = generate_pkce()
+        # Manter no máx _MAX_PENDING entradas; descartar a mais antiga.
+        if len(_pending_verifiers) >= _MAX_PENDING:
+            oldest = next(iter(_pending_verifiers))
+            del _pending_verifiers[oldest]
+        _pending_verifiers[state] = verifier
+        url = build_authorize_url(state, challenge)
+        return {"url": url, "state": state}
+
+    @app.post("/api/auth/anthropic/exchange")
+    def api_exchange(body: ExchangeBody) -> dict:
+        """Troca código de autorização por tokens e persiste."""
+        code = body.code.strip()
+        state = body.state.strip()
+        # code pode conter state como fragmento (#)
+        if "#" in code:
+            code, state = code.split("#", 1)
+        verifier = _pending_verifiers.pop(state, None)
+        if verifier is None:
+            raise HTTPException(400, "State inválido ou expirado")
+        try:
+            d = exchange_code(code, state, verifier)
+        except Exception as exc:
+            raise HTTPException(400, f"Troca de código falhou: {exc}") from exc
+        account = d.get("account") or {}
+        now_ms = int(time.time() * 1000)
+        tokens = {
+            "access": d["access_token"],
+            "refresh": d["refresh_token"],
+            "expires": now_ms + d["expires_in"] * 1000 - 5 * 60 * 1000,
+            "email": account.get("email_address"),
+            "account_id": account.get("uuid"),
+        }
+        settings = load_settings()
+        save_tokens(settings, tokens)
+        # Ativar provider anthropic automaticamente após login.
+        save_local_settings({"llm_provider": "anthropic"}, settings)
+        return {"ok": True, "email": tokens["email"]}
+
+    @app.delete("/api/auth/anthropic")
+    def api_logout_anthropic() -> dict:
+        """Remove tokens OAuth Anthropic."""
+        settings = load_settings()
+        clear_tokens(settings)
+        return {"ok": True}
 
     # ── SPA (REGISTRAR POR ÚLTIMO) ────────────────────────────────────────────
 

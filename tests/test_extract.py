@@ -265,10 +265,12 @@ def test_extract_skips_non_dict_items(monkeypatch: pytest.MonkeyPatch) -> None:
 # get_provider — validation
 # ---------------------------------------------------------------------------
 
-def test_get_provider_anthropic_missing_key_raises() -> None:
-    """Missing anthropic_api_key raises ValueError mentioning the key name."""
-    s = Settings(llm_provider="anthropic", anthropic_api_key="")
-    with pytest.raises(ValueError, match="anthropic_api_key"):
+def test_get_provider_anthropic_no_credentials_raises(tmp_path) -> None:
+    """Sem OAuth (auth.json) e sem api key, aponta pra página Configurações."""
+    s = Settings(
+        llm_provider="anthropic", anthropic_api_key="", data_dir=tmp_path
+    )
+    with pytest.raises(ValueError, match="Configurações|ANTHROPIC_API_KEY"):
         get_provider(s)
 
 
