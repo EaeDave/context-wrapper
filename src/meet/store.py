@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import ActionItem, MeetingResult, TranscriptSegment
@@ -52,6 +54,32 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5 (
 );
 """
 
+# Colunas novas (migração idempotente via PRAGMA table_info)
+_MEETING_EXTRA_COLS: list[tuple[str, str]] = [
+    ("source_origin", "TEXT NOT NULL DEFAULT ''"),
+    ("media_managed", "INTEGER NOT NULL DEFAULT 0"),
+    ("created_at", "TEXT NOT NULL DEFAULT ''"),
+    ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+]
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+@dataclass
+class MeetingRow:
+    """Resumo de reunião pra listagem / UI."""
+
+    id: int
+    date: str
+    title: str
+    source: str
+    source_origin: str
+    media_managed: bool
+    media_ok: bool
+    duration: float = 0.0
+
 
 class Store:
     """Banco de dados de reuniões (sqlite3, WAL)."""
@@ -61,6 +89,34 @@ class Store:
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        cols = {
+            r["name"]
+            for r in self._conn.execute("PRAGMA table_info(meetings)").fetchall()
+        }
+        with self._conn:
+            for name, decl in _MEETING_EXTRA_COLS:
+                if name not in cols:
+                    self._conn.execute(
+                        f"ALTER TABLE meetings ADD COLUMN {name} {decl}"
+                    )
+            # Backfill timestamps vazios
+            now = _now()
+            self._conn.execute(
+                "UPDATE meetings SET created_at = ? WHERE created_at = '' OR created_at IS NULL",
+                (now,),
+            )
+            self._conn.execute(
+                "UPDATE meetings SET updated_at = ? WHERE updated_at = '' OR updated_at IS NULL",
+                (now,),
+            )
+            # Reuniões antigas: source_origin vazio → copia source
+            self._conn.execute(
+                "UPDATE meetings SET source_origin = source"
+                " WHERE source_origin = '' OR source_origin IS NULL"
+            )
 
     # ------------------------------------------------------------------
     # Reuniões
@@ -68,10 +124,14 @@ class Store:
 
     def save_meeting(self, result: MeetingResult, md_path: Path) -> int:
         """Persiste reunião completa; retorna o id gerado."""
+        now = _now()
+        origin = result.source
         with self._conn:
             cur = self._conn.execute(
-                "INSERT INTO meetings (date, title, source, duration, summary, md_path)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO meetings"
+                " (date, title, source, duration, summary, md_path,"
+                "  source_origin, media_managed, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
                 (
                     result.date,
                     result.title,
@@ -79,6 +139,9 @@ class Store:
                     result.duration,
                     result.summary,
                     str(md_path),
+                    origin,
+                    now,
+                    now,
                 ),
             )
             meeting_id: int = cur.lastrowid  # type: ignore[assignment]
@@ -110,9 +173,10 @@ class Store:
         return meeting_id
 
     def get_meeting(self, meeting_id: int) -> MeetingResult | None:
-        """Reconstrói MeetingResult; anexa atributo `.md_path: Path` ao objeto."""
+        """Reconstrói MeetingResult; anexa attrs de mídia/md_path."""
         row = self._conn.execute(
-            "SELECT id, date, title, source, duration, summary, md_path"
+            "SELECT id, date, title, source, duration, summary, md_path,"
+            "       source_origin, media_managed, created_at, updated_at"
             " FROM meetings WHERE id = ?",
             (meeting_id,),
         ).fetchone()
@@ -160,15 +224,42 @@ class Store:
             action_items=action_items,
             segments=segments,
         )
-        result.md_path = Path(row["md_path"])  # type: ignore[attr-defined]
+        result.md_path = Path(row["md_path"]) if row["md_path"] else None  # type: ignore[attr-defined]
+        result.meeting_id = meeting_id  # type: ignore[attr-defined]
+        result.source_origin = row["source_origin"] or row["source"]  # type: ignore[attr-defined]
+        result.media_managed = bool(row["media_managed"])  # type: ignore[attr-defined]
+        result.media_ok = Path(row["source"]).expanduser().is_file()  # type: ignore[attr-defined]
+        result.created_at = row["created_at"] or ""  # type: ignore[attr-defined]
+        result.updated_at = row["updated_at"] or ""  # type: ignore[attr-defined]
         return result
 
     def list_meetings(self) -> list[tuple[int, str, str]]:
-        """(id, date, title) de todas as reuniões, mais recentes primeiro."""
+        """(id, date, title) — compat CLI / testes."""
+        rows = self.list_meeting_rows()
+        return [(r.id, r.date, r.title) for r in rows]
+
+    def list_meeting_rows(self) -> list[MeetingRow]:
+        """Listagem rica com status de mídia."""
         rows = self._conn.execute(
-            "SELECT id, date, title FROM meetings ORDER BY date DESC, id DESC"
+            "SELECT id, date, title, source, source_origin, media_managed, duration"
+            " FROM meetings ORDER BY date DESC, id DESC"
         ).fetchall()
-        return [(r["id"], r["date"], r["title"]) for r in rows]
+        out: list[MeetingRow] = []
+        for r in rows:
+            src = r["source"] or ""
+            out.append(
+                MeetingRow(
+                    id=r["id"],
+                    date=r["date"],
+                    title=r["title"],
+                    source=src,
+                    source_origin=r["source_origin"] or src,
+                    media_managed=bool(r["media_managed"]),
+                    media_ok=Path(src).expanduser().is_file() if src else False,
+                    duration=float(r["duration"] or 0),
+                )
+            )
+        return out
 
     def search(self, query: str, limit: int = 20) -> list[dict]:
         """FTS5 full-text search; retorna dicts com meeting_id, date, title, kind, snippet."""
@@ -187,6 +278,106 @@ class Store:
         rows = self._conn.execute(sql, (query, limit)).fetchall()
         return [dict(r) for r in rows]
 
+    def update_title(self, meeting_id: int, title: str) -> bool:
+        """Atualiza título; retorna False se id inexistente."""
+        title = title.strip()
+        if not title:
+            raise ValueError("Título vazio")
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE meetings SET title = ?, updated_at = ? WHERE id = ?",
+                (title, _now(), meeting_id),
+            )
+            return cur.rowcount > 0
+
+    def update_summary(self, meeting_id: int, summary: str) -> bool:
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE meetings SET summary = ?, updated_at = ? WHERE id = ?",
+                (summary, _now(), meeting_id),
+            )
+            return cur.rowcount > 0
+
+    def set_media(
+        self,
+        meeting_id: int,
+        *,
+        source: Path,
+        source_origin: str,
+        media_managed: bool,
+    ) -> None:
+        """Atualiza paths de mídia após import/relink."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE meetings SET source = ?, source_origin = ?,"
+                " media_managed = ?, updated_at = ? WHERE id = ?",
+                (
+                    str(source),
+                    source_origin,
+                    1 if media_managed else 0,
+                    _now(),
+                    meeting_id,
+                ),
+            )
+
+    def adopt_media(self, meeting_id: int, data_dir: Path, origin: Path) -> Path:
+        """Importa origin para media/{id}/ e atualiza o registro."""
+        from . import media as media_mod
+
+        origin = Path(origin).expanduser()
+        dest = media_mod.import_original(data_dir, meeting_id, origin)
+        self.set_media(
+            meeting_id,
+            source=dest,
+            source_origin=str(origin.resolve()),
+            media_managed=True,
+        )
+        # MeetingResult.source no pipeline já foi o origin — quem lê o DB vê dest
+        return dest
+
+    def delete_meeting(
+        self,
+        meeting_id: int,
+        *,
+        data_dir: Path,
+        delete_markdown: bool = True,
+    ) -> bool:
+        """Apaga reunião do DB, pending, pasta media/{id}/ e opcionalmente o .md."""
+        from . import media as media_mod
+
+        row = self._conn.execute(
+            "SELECT md_path, media_managed FROM meetings WHERE id = ?",
+            (meeting_id,),
+        ).fetchone()
+        if row is None:
+            return False
+
+        md_path = row["md_path"] or ""
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM search_index WHERE meeting_id = ?", (meeting_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM segments WHERE meeting_id = ?", (meeting_id,)
+            )
+            self._conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
+
+        media_mod.purge_media(data_dir, meeting_id)
+
+        pending = data_dir / "pending" / f"{meeting_id}.npz"
+        if pending.is_file():
+            pending.unlink(missing_ok=True)
+
+        if delete_markdown and md_path:
+            p = Path(md_path)
+            if p.is_file():
+                p.unlink(missing_ok=True)
+
+        return True
+
     def update_speaker(self, meeting_id: int, old: str, new: str) -> None:
         """Renomeia falante em segments e reindexa FTS da reunião."""
         with self._conn:
@@ -194,7 +385,6 @@ class Store:
                 "UPDATE segments SET speaker = ? WHERE meeting_id = ? AND speaker = ?",
                 (new, meeting_id, old),
             )
-            # Remove e reindexa todos os registros FTS da reunião
             self._conn.execute(
                 "DELETE FROM search_index WHERE meeting_id = ?",
                 (meeting_id,),
@@ -226,6 +416,10 @@ class Store:
                 )
             ]
             self._index_meeting(meeting_id, segs, items)
+            self._conn.execute(
+                "UPDATE meetings SET updated_at = ? WHERE id = ?",
+                (_now(), meeting_id),
+            )
 
     # ------------------------------------------------------------------
     # Banco de vozes

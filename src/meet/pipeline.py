@@ -29,6 +29,7 @@ def run_pipeline(
     others_track: int = 2,
     no_llm: bool = False,
     keep_wav: bool = False,
+    import_media: bool = True,
     today: str | None = None,
     on_progress: ProgressCb | None = None,
 ) -> tuple[int, MeetingResult, Path]:
@@ -36,6 +37,9 @@ def run_pipeline(
 
     Returns:
         (meeting_id, result, md_path)
+
+    Se ``import_media`` (default), copia o vídeo para
+    ``~/.local/share/meet/media/{id}/original.ext`` e atualiza o SQLite.
 
     Raises:
         FileNotFoundError, RuntimeError, ValueError — erros de pipeline.
@@ -52,6 +56,7 @@ def run_pipeline(
             mic_track=mic_track,
             others_track=others_track,
             no_llm=no_llm,
+            import_media=import_media,
             settings=settings,
             store=store,
             workdir=workdir,
@@ -72,6 +77,7 @@ def _run(
     mic_track: int,
     others_track: int,
     no_llm: bool,
+    import_media: bool,
     settings: Settings,
     store: Store,
     workdir: Path,
@@ -176,6 +182,15 @@ def _run(
     md_path = settings.output_dir / filename
     md_path.write_text(md_content, encoding="utf-8")
     meeting_id = store.save_meeting(result, md_path)
+
+    if import_media:
+        progress("Importando vídeo para o meet (media/{id})…")
+        try:
+            dest = store.adopt_media(meeting_id, settings.data_dir, video)
+            result.source = str(dest)
+        except Exception as exc:
+            # Pipeline ok; import falhou — reunião fica com path externo
+            progress(f"Aviso: não importou mídia ({exc})")
 
     if unresolved:
         import numpy as np

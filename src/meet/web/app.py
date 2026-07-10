@@ -102,7 +102,7 @@ def create_app() -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request, q: str = "") -> HTMLResponse:
         settings, store = _settings_store()
-        meetings = store.list_meetings()
+        meetings = store.list_meeting_rows()
         results = store.search(q, limit=30) if q.strip() else []
         jobs = manager.list_recent(8)
         return render(
@@ -172,10 +172,13 @@ def create_app() -> FastAPI:
         mic_track: Annotated[int, Form()] = 1,
         others_track: Annotated[int, Form()] = 2,
         no_llm: Annotated[str, Form()] = "",
+        import_media: Annotated[str, Form()] = "on",
     ) -> RedirectResponse:
         path = Path(video).expanduser()
         if not path.is_file():
             raise HTTPException(400, f"Arquivo inválido: {video}")
+        # checkbox: presente = on; ausente = não importar
+        do_import = import_media in ("on", "true", "1", "yes")
         job = manager.submit(
             kind="process",
             label=path.name,
@@ -184,6 +187,7 @@ def create_app() -> FastAPI:
             mic_track=mic_track,
             others_track=others_track,
             no_llm=no_llm in ("on", "true", "1", "yes"),
+            import_media=do_import,
         )
         return RedirectResponse(f"/jobs/{job.id}", status_code=303)
 
@@ -208,7 +212,10 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Reunião não encontrada")
         source = Path(result.source)
         if not source.is_file():
-            raise HTTPException(404, "Arquivo fonte não encontrado no disco")
+            raise HTTPException(
+                404,
+                "Vídeo ausente no disco. Use “Localizar vídeo” na página da reunião.",
+            )
         return result, source
 
     def _serve_listen_file(
@@ -322,6 +329,8 @@ def create_app() -> FastAPI:
         # Labels do seletor Plyr (size = altura aproximada)
         web_h = min(720, source_h) if source_h else 720
         full_h = source_h or 1080
+        media_managed = bool(getattr(result, "media_managed", False))
+        source_origin = getattr(result, "source_origin", result.source) or result.source
         return render(
             request,
             "meeting.html",
@@ -339,7 +348,68 @@ def create_app() -> FastAPI:
             quality_web_h=web_h,
             quality_full_h=full_h,
             md_path=getattr(result, "md_path", None),
+            media_managed=media_managed,
+            source_origin=source_origin,
         )
+
+    @app.post("/meetings/{meeting_id}/edit")
+    def edit_meeting(
+        meeting_id: int,
+        title: Annotated[str, Form()],
+    ) -> RedirectResponse:
+        from .. import render as render_mod
+
+        settings, store = _settings_store()
+        try:
+            ok = store.update_title(meeting_id, title)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not ok:
+            raise HTTPException(404, "Reunião não encontrada")
+        result = store.get_meeting(meeting_id)
+        if result is not None:
+            md_path = getattr(result, "md_path", None)
+            if md_path:
+                Path(md_path).write_text(
+                    render_mod.to_markdown(result), encoding="utf-8"
+                )
+        return RedirectResponse(f"/meetings/{meeting_id}", status_code=303)
+
+    @app.post("/meetings/{meeting_id}/delete")
+    def delete_meeting(
+        meeting_id: int,
+        confirm: Annotated[str, Form()] = "",
+    ) -> RedirectResponse:
+        settings, store = _settings_store()
+        if confirm not in ("on", "true", "1", "yes", "delete"):
+            raise HTTPException(400, "Confirme a exclusão")
+        if not store.delete_meeting(meeting_id, data_dir=settings.data_dir):
+            raise HTTPException(404, "Reunião não encontrada")
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/meetings/{meeting_id}/relink")
+    def relink_meeting(
+        meeting_id: int,
+        path: Annotated[str, Form()],
+        import_media: Annotated[str, Form()] = "on",
+    ) -> RedirectResponse:
+        settings, store = _settings_store()
+        result = store.get_meeting(meeting_id)
+        if result is None:
+            raise HTTPException(404, "Reunião não encontrada")
+        src = Path(path).expanduser()
+        if not src.is_file():
+            raise HTTPException(400, f"Arquivo inválido: {path}")
+        if import_media in ("on", "true", "1", "yes"):
+            store.adopt_media(meeting_id, settings.data_dir, src)
+        else:
+            store.set_media(
+                meeting_id,
+                source=src.resolve(),
+                source_origin=str(src.resolve()),
+                media_managed=False,
+            )
+        return RedirectResponse(f"/meetings/{meeting_id}", status_code=303)
 
     @app.get("/meetings/{meeting_id}/preview")
     def meeting_preview(

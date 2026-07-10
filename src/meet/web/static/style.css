@@ -392,6 +392,41 @@ h2 {
   font-weight: 500;
 }
 
+.row-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+.pill-status {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  padding: 0.18rem 0.55rem;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.pill-status.ok {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.pill-status.missing {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+.pill-status.managed {
+  color: var(--info);
+  border-color: color-mix(in srgb, var(--info) 35%, var(--border));
+}
+.pill-status.link {
+  color: var(--faint);
+}
+
 .summary {
   white-space: pre-wrap;
   color: var(--text);

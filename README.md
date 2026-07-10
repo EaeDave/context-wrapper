@@ -128,6 +128,18 @@ uv run meet serve -p 9000    # outra porta
 
 Só escuta em `127.0.0.1` por padrão (dados de reunião ficam na máquina).
 
+#### SQLite + mídia gerida
+
+- **Banco:** `~/.local/share/meet/meet.db` (transcript, action items, paths)
+- **Vídeo importado (default):** `~/.local/share/meet/media/{id}/original.ext`
+- **Lista/detalhe** mostram se o vídeo está **ok** ou **ausente**
+- **CRUD:** editar título, excluir reunião (apaga DB + pasta media + markdown)
+- **Relink:** se o arquivo sumiu, apontar de novo (com ou sem reimportar)
+- Processar com checkbox “Importar vídeo pro meet”; CLI: `--no-import` pra só linkar
+
+O path do OBS fica em `source_origin` (histórico). O player usa o path canônico
+(`source`), de preferência dentro de `media/{id}/`.
+
 ### Banco de vozes
 
 Na primeira reunião os falantes saem como `SPEAKER_00`, `SPEAKER_01`...

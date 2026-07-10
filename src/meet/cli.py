@@ -69,6 +69,13 @@ def process(
         bool,
         typer.Option("--keep-wav", help="Manter arquivos wav temporários após processamento"),
     ] = False,
+    no_import: Annotated[
+        bool,
+        typer.Option(
+            "--no-import",
+            help="Não copiar o vídeo para ~/.local/share/meet/media/{id}/",
+        ),
+    ] = False,
 ) -> None:
     """Processa uma gravação de reunião: áudio → transcript → diarização → action items."""
     from .pipeline import run_pipeline
@@ -96,6 +103,7 @@ def process(
             others_track=others_track,
             no_llm=no_llm,
             keep_wav=keep_wav,
+            import_media=not no_import,
             on_progress=on_progress,
         )
     except Exception as exc:

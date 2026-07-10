@@ -340,3 +340,53 @@ def test_voices_isolation_between_meetings(tmp_store: Store) -> None:
     got = tmp_store.get_meeting(mid)
     assert got is not None  # meeting still retrievable
     assert tmp_store.get_voice("Alice") == b"emb"  # voice still correct
+
+
+# ---------------------------------------------------------------------------
+# Media / CRUD
+# ---------------------------------------------------------------------------
+
+def test_list_meeting_rows_media_status(tmp_store: Store, tmp_path: Path) -> None:
+    video = tmp_path / "call.mkv"
+    video.write_bytes(b"fake")
+    mid = tmp_store.save_meeting(_meeting(source=str(video)), Path("/tmp/a.md"))
+    rows = tmp_store.list_meeting_rows()
+    assert any(r.id == mid and r.media_ok for r in rows)
+
+    video.unlink()
+    rows2 = tmp_store.list_meeting_rows()
+    row = next(r for r in rows2 if r.id == mid)
+    assert row.media_ok is False
+
+
+def test_update_title(tmp_store: Store) -> None:
+    mid = tmp_store.save_meeting(_meeting(title="Old"), Path("/tmp/a.md"))
+    assert tmp_store.update_title(mid, "New title")
+    got = tmp_store.get_meeting(mid)
+    assert got is not None
+    assert got.title == "New title"
+
+
+def test_adopt_media_and_delete(tmp_store: Store, tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    origin = tmp_path / "obs.mkv"
+    origin.write_bytes(b"video-bytes")
+    mid = tmp_store.save_meeting(_meeting(source=str(origin)), Path("/tmp/a.md"))
+
+    dest = tmp_store.adopt_media(mid, data_dir, origin)
+    assert dest.is_file()
+    assert dest.read_bytes() == b"video-bytes"
+    got = tmp_store.get_meeting(mid)
+    assert got is not None
+    assert got.media_managed is True  # type: ignore[attr-defined]
+    assert got.source == str(dest)
+    assert origin.is_file()  # origem preservada
+
+    assert tmp_store.delete_meeting(mid, data_dir=data_dir)
+    assert tmp_store.get_meeting(mid) is None
+    assert not (data_dir / "media" / str(mid)).exists()
+
+
+def test_delete_missing_returns_false(tmp_store: Store, tmp_path: Path) -> None:
+    assert tmp_store.delete_meeting(99999, data_dir=tmp_path) is False

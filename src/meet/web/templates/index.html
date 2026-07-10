@@ -4,7 +4,7 @@
   <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;flex-wrap:wrap">
     <div>
       <h1>Reuniões</h1>
-      <p class="lead">Histórico processado, busca e jobs recentes.</p>
+      <p class="lead">Histórico no SQLite · mídia em ~/.local/share/meet/media/</p>
     </div>
     <a class="btn btn-primary" href="/new">+ Processar gravação</a>
   </div>
@@ -50,13 +50,24 @@
   <h2>Todas</h2>
   {% if meetings %}
     <div class="stack">
-      {% for mid, date, title in meetings %}
+      {% for row in meetings %}
         <div class="row">
           <div>
-            <a class="title" href="/meetings/{{ mid }}">{{ title }}</a>
-            <div class="meta">#{{ mid }} · {{ date }}</div>
+            <a class="title" href="/meetings/{{ row.id }}">{{ row.title }}</a>
+            <div class="meta">#{{ row.id }} · {{ row.date }} · {{ fmt_duration(row.duration) }}</div>
           </div>
-          <span class="meta">abrir →</span>
+          <div class="row-badges">
+            {% if row.media_ok %}
+              <span class="pill-status ok" title="{{ row.source }}">vídeo ok</span>
+            {% else %}
+              <span class="pill-status missing" title="{{ row.source }}">vídeo ausente</span>
+            {% endif %}
+            {% if row.media_managed %}
+              <span class="pill-status managed" title="Copiado para o meet">gerido</span>
+            {% else %}
+              <span class="pill-status link" title="Path externo">link</span>
+            {% endif %}
+          </div>
         </div>
       {% endfor %}
     </div>
