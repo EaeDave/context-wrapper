@@ -181,6 +181,41 @@ def ensure_listen_mix(
     )
 
 
+def _preview_is_browser_safe(path: Path) -> bool:
+    """True se o mp4 já é H.264 Main/Baseline e largura ≤ 1280 (cache bom)."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "quiet",
+            "-print_format", "json",
+            "-show_streams",
+            "-select_streams", "v:0",
+            str(path),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            return False
+        streams = json.loads(proc.stdout).get("streams") or []
+        if not streams:
+            return False
+        v = streams[0]
+        profile = (v.get("profile") or "").lower()
+        width = int(v.get("width") or 0)
+        level = int(v.get("level") or 0)
+        # High@L5.x 2560px = cache antigo (copy) que quebra o <video>
+        if width > 1280:
+            return False
+        if level >= 51:  # 5.1+
+            return False
+        if "high" in profile and "constrained" not in profile:
+            # Main/Baseline preferidos; High 720/1080 costuma ok, mas
+            # rejeitamos High vindo do copy antigo (geralmente L5.1 wide)
+            if width > 960:
+                return False
+        return v.get("codec_name") == "h264"
+    except Exception:
+        return False
+
+
 def ensure_listen_preview(
     input_path: Path,
     *,
@@ -192,6 +227,7 @@ def ensure_listen_preview(
     """Retorna o .listen.mp4 (vídeo + tracks misturadas), gerando se faltar.
 
     Sem stream de vídeo no arquivo-fonte, cai no mix só de áudio (.listen.m4a).
+    Invalida cache antigo (copy High@L5.1 full-res) que o browser não toca.
     """
     input_path = Path(input_path)
     if probe_video_streams(input_path) < 1:
@@ -202,7 +238,11 @@ def ensure_listen_preview(
             others_track=others_track,
         )
     out = Path(output_path) if output_path else listen_preview_path(input_path)
-    if not force and _cache_is_fresh(out, input_path):
+    if (
+        not force
+        and _cache_is_fresh(out, input_path)
+        and _preview_is_browser_safe(out)
+    ):
         return out
     return export_listen_preview(
         input_path,
@@ -218,10 +258,13 @@ def export_listen_preview(
     *,
     mic_track: int = 1,
     others_track: int = 2,
+    max_width: int = 1280,
 ) -> Path:
-    """Gera mp4 com vídeo (copy) + áudio mic/desktop misturados.
+    """Gera mp4 browser-safe: vídeo H.264 Main + áudio mic/desktop misturados.
 
-    Browser-friendly: H.264 copy + AAC, ``faststart`` pra seek no player.
+    Não usa ``-c:v copy``: gravações OBS em 2560×1080@60 High@L5.1 falham
+    em vários browsers (Chrome/Firefox no Linux). Re-encode leve +
+    ``faststart`` garante seek e decode no ``<video>`` embutido.
     """
     n_audio = probe_audio_streams(input_path)
     if probe_video_streams(input_path) < 1:
@@ -231,10 +274,17 @@ def export_listen_preview(
         output_path = listen_preview_path(input_path)
     output_path = Path(output_path)
 
-    common_out = [
-        "-c:v", "copy",
+    # scale só se for maior que max_width; yuv420p + Main@L4.0 = universal
+    vf = f"scale='min({max_width},iw)':-2"
+    video_audio_out = [
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "22",
+        "-profile:v", "main",
+        "-level", "4.0",
+        "-pix_fmt", "yuv420p",
         "-c:a", "aac",
-        "-b:a", "192k",
+        "-b:a", "160k",
         "-movflags", "+faststart",
         str(output_path),
     ]
@@ -244,13 +294,16 @@ def export_listen_preview(
             "-i", str(input_path),
             "-map", "0:v:0",
             "-map", "0:a:0",
-            *common_out,
+            "-vf", vf,
+            *video_audio_out,
         ])
         return output_path
 
     mic_idx = mic_track - 1
     others_idx = others_track - 1
+    # amix + scale no mesmo filter graph
     filter_str = (
+        f"[0:v:0]{vf}[v];"
         f"[0:a:{mic_idx}][0:a:{others_idx}]"
         f"amix=inputs=2:duration=longest:normalize=0,"
         f"alimiter=limit=0.95[a]"
@@ -258,9 +311,9 @@ def export_listen_preview(
     _run_ffmpeg([
         "-i", str(input_path),
         "-filter_complex", filter_str,
-        "-map", "0:v:0",
+        "-map", "[v]",
         "-map", "[a]",
-        *common_out,
+        *video_audio_out,
     ])
     return output_path
 

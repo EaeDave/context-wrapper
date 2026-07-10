@@ -317,8 +317,10 @@ def create_app() -> FastAPI:
     def meeting_preview(
         meeting_id: int,
         force: Annotated[bool, Query()] = False,
+        v: Annotated[str | None, Query()] = None,  # cache-bust opcional
     ) -> FileResponse:
         """Vídeo + mic/desktop misturados (mp4). Sem vídeo, devolve só áudio."""
+        del v  # só query string
         return _serve_listen_file(meeting_id, kind="preview", force=force)
 
     @app.get("/meetings/{meeting_id}/audio")

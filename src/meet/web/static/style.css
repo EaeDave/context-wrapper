@@ -572,9 +572,17 @@ audio.player {
 }
 .video-player {
   display: block;
+  width: 100%;
+  min-height: 220px;
   max-height: min(70vh, 520px);
   aspect-ratio: 16 / 9;
   object-fit: contain;
+  background: #000;
+}
+.player-error {
+  margin: 0.65rem 0 0;
+  font-size: 0.85rem;
+  color: var(--danger);
 }
 /* dark-friendly native controls where supported */
 .player::-webkit-media-controls-panel {

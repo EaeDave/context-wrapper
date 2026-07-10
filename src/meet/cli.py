@@ -136,6 +136,36 @@ def process(
 # ---------------------------------------------------------------------------
 
 
+def _port_in_use(host: str, port: int) -> int | None:
+    """Retorna PID que escuta em host:port, ou None se livre."""
+    import socket
+
+    # Tentativa de bind: se falhar, tenta achar o PID via /proc
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+            return None
+        except OSError:
+            pass
+
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["ss", "-ltnp", f"sport = :{port}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+        import re
+
+        m = re.search(r"pid=(\d+)", out)
+        return int(m.group(1)) if m else -1
+    except Exception:
+        return -1
+
+
 @app.command()
 def serve(
     host: Annotated[str, typer.Option("--host", help="Bind address")] = "127.0.0.1",
@@ -153,6 +183,20 @@ def serve(
             "[red]Dependências web ausentes.[/red] Rode: uv sync"
         )
         raise typer.Exit(1) from exc
+
+    busy = _port_in_use(host, port)
+    if busy is not None:
+        err_console.print(
+            f"[red]Porta {port} já em uso[/red]"
+            + (f" (pid {busy})" if busy > 0 else "")
+            + "."
+        )
+        err_console.print(
+            f"[dim]Encerre o processo antigo e tente de novo:[/dim]\n"
+            f"  kill {busy if busy and busy > 0 else '$(ss -ltnp sport = :' + str(port) + \" | rg -o 'pid=[0-9]+' | head -1 | cut -d= -f2)\"}\n"
+            f"  # ou outra porta: uv run meet serve -p {port + 1}"
+        )
+        raise typer.Exit(1)
 
     from .web.app import create_app
 

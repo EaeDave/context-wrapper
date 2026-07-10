@@ -279,6 +279,25 @@ def test_export_listen_preview_has_video_and_one_audio(tmp_path: Path) -> None:
     from meet.audio import probe_audio_streams
 
     assert probe_audio_streams(out) == 1
+    # Browser-safe: Main profile (not High@L5.1 copy)
+    import json
+    import subprocess
+
+    info = json.loads(
+        subprocess.run(
+            [
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_streams", "-select_streams", "v:0", str(out),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    )
+    v = info["streams"][0]
+    assert v["codec_name"] == "h264"
+    assert v.get("profile") in ("Main", "Constrained Baseline", "Baseline", "High")
+    assert int(v.get("width", 9999)) <= 1280
 
 
 def test_ensure_listen_preview_caches(tmp_path: Path) -> None:
