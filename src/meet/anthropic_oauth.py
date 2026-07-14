@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import time
+import threading
 from pathlib import Path
 
 import httpx
@@ -17,6 +18,7 @@ _AUTHORIZE_BASE = "https://claude.ai/oauth/authorize"
 _TOKEN_URL = "https://api.anthropic.com/v1/oauth/token"
 _OAUTH_BETA = "oauth-2025-04-20"
 _BUFFER_MS = 5 * 60 * 1000  # 5 min de margem antes do vencimento
+_REFRESH_LOCK = threading.Lock()
 
 
 def _anthropic_error(resp: httpx.Response) -> str:
@@ -95,7 +97,7 @@ def exchange_code(code: str, state: str, verifier: str) -> dict:
 
 
 def refresh(refresh_token: str) -> dict:
-    """Renova access token. Refresh token não rotaciona. Retry 1x em falha de rede."""
+    """Renova tokens OAuth. Anthropic rotaciona o refresh token a cada uso."""
     payload = {
         "grant_type": "refresh_token",
         "client_id": CLIENT_ID,
@@ -164,10 +166,7 @@ def clear_tokens(settings) -> None:
 
 
 def get_access_token(settings) -> str:
-    """Retorna access token válido; faz refresh automático se expirado e persiste.
-
-    Lança ValueError com mensagem clara se o usuário não estiver autenticado.
-    """
+    """Retorna access token válido, renovando e persistindo a rotação OAuth."""
     tokens = load_tokens(settings)
     if not tokens:
         raise ValueError(
@@ -176,12 +175,37 @@ def get_access_token(settings) -> str:
         )
 
     now_ms = int(time.time() * 1000)
-    if tokens.get("expires", 0) <= now_ms:
-        d = refresh(tokens["refresh"])
+    if tokens.get("expires", 0) > now_ms:
+        return tokens["access"]
+
+    # Refresh tokens são rotativos e de uso único. Serializar e reler o arquivo
+    # evita que duas requisições deste processo tentem consumir o mesmo token.
+    with _REFRESH_LOCK:
+        tokens = load_tokens(settings)
+        if not tokens:
+            raise ValueError(
+                "Não autenticado com Anthropic OAuth. "
+                "Acesse a página Configurações para conectar."
+            )
+        now_ms = int(time.time() * 1000)
+        if tokens.get("expires", 0) > now_ms:
+            return tokens["access"]
+
+        try:
+            d = refresh(tokens["refresh"])
+        except RuntimeError as exc:
+            if "invalid_grant" in str(exc):
+                clear_tokens(settings)
+                raise ValueError(
+                    "Sessão Claude expirada ou revogada. "
+                    "Reconecte sua conta na página Configurações."
+                ) from exc
+            raise
+
         account = d.get("account") or {}
         tokens = {
             "access": d["access_token"],
-            "refresh": tokens["refresh"],  # não rotaciona
+            "refresh": d.get("refresh_token") or tokens["refresh"],
             "expires": now_ms + d["expires_in"] * 1000 - _BUFFER_MS,
             "email": account.get("email_address") or tokens.get("email"),
             "account_id": account.get("uuid") or tokens.get("account_id"),

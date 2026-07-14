@@ -24,6 +24,7 @@ from meet.anthropic_oauth import (
     _anthropic_error,
     _check_response,
     clear_tokens,
+    get_access_token,
     load_tokens,
     save_tokens,
 )
@@ -214,6 +215,59 @@ def test_load_tokens_invalid_json(tmp_path: Path) -> None:
     (settings.data_dir / "auth.json").write_text("não é json {{{")
     assert load_tokens(settings) is None
 
+
+
+def test_refresh_persiste_token_rotacionado(tmp_path: Path) -> None:
+    """Refresh OAuth deve substituir o refresh token de uso único."""
+    settings = _make_settings(tmp_path)
+    save_tokens(
+        settings,
+        {
+            "access": "access-antigo",
+            "refresh": "refresh-antigo",
+            "expires": 0,
+            "email": "test@example.com",
+            "account_id": "acc-123",
+        },
+    )
+
+    refreshed = {
+        "access_token": "access-novo",
+        "refresh_token": "refresh-novo",
+        "expires_in": 3600,
+    }
+    with patch("meet.anthropic_oauth.refresh", return_value=refreshed):
+        assert get_access_token(settings) == "access-novo"
+
+    tokens = load_tokens(settings)
+    assert tokens is not None
+    assert tokens["refresh"] == "refresh-novo"
+
+
+def test_refresh_invalido_limpa_sessao(tmp_path: Path) -> None:
+    """Token revogado deve virar pedido de reconexão e não ficar parecendo conectado."""
+    settings = _make_settings(tmp_path)
+    save_tokens(
+        settings,
+        {
+            "access": "access-expirado",
+            "refresh": "refresh-revogado",
+            "expires": 0,
+            "email": "test@example.com",
+            "account_id": "acc-123",
+        },
+    )
+
+    error = RuntimeError(
+        'HTTP 400: {"error":"invalid_grant","error_description":"Refresh token not found or invalid"}'
+    )
+    with (
+        patch("meet.anthropic_oauth.refresh", side_effect=error),
+        pytest.raises(ValueError, match="Reconecte sua conta"),
+    ):
+        get_access_token(settings)
+
+    assert load_tokens(settings) is None
 
 # ---------------------------------------------------------------------------
 # Masking — nunca vazar token inteiro

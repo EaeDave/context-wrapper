@@ -96,6 +96,15 @@ def _analyse(
     from . import transcribe as transcribe_mod
     from . import voicebank as voicebank_mod
 
+    if not no_llm:
+        from . import extract as extract_mod
+
+        progress("Validando acesso ao LLM…")
+        try:
+            extract_mod.validate_credentials(settings)
+        except Exception as exc:
+            raise RuntimeError(f"Erro na autenticação LLM: {exc}") from exc
+
     progress("Preparando áudio…")
     try:
         tracks = audio_mod.prepare(video, workdir, mic_track, others_track)

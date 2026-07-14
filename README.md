@@ -8,6 +8,37 @@ estruturados via LLM — tudo local, exceto a chamada opcional ao LLM.
 gravação (OBS) ──> wav 16k ──> transcrição + diarização ──> LLM ──> markdown + busca
 ```
 
+<!-- business-readme:business-rules:start -->
+## Regras do produto
+
+- Uma gravação pode ter uma faixa única ou faixas separadas de microfone e
+  participantes. Com faixas separadas, a voz do usuário entra como `me`; com
+  faixa única, todos os falantes passam pela diarização.
+- O processamento completo prepara o áudio, transcreve, diariza, reconhece
+  vozes, extrai resumo/action items, salva o resultado e, por padrão, importa a
+  mídia. A opção “Sem LLM” mantém transcrição e diarização, sem resumo nem
+  action items. **Job interno:** `process`; **endpoint interno:** `POST /api/process`.
+- Quando o LLM está habilitado, suas credenciais são validadas antes das etapas
+  caras. Sessão Claude expirada/revogada encerra o job imediatamente e orienta
+  reconexão em Configurações, evitando perder minutos transcrevendo antes da
+  falha. **Integração externa:** Anthropic OAuth; **job interno:** `process`.
+- A autenticação Claude Pro/Max renova tokens automaticamente. Cada renovação
+  persiste o novo refresh token rotacionado; token já revogado exige uma nova
+  autenticação manual. **Endpoints internos:** `/api/auth/anthropic/*`.
+- Jobs são executados em fila, um por vez, porque Whisper e pyannote compartilham
+  GPU. O estado é persistido; jobs interrompidos por reinício do servidor viram
+  erro em vez de serem retomados silenciosamente. **Endpoints internos:**
+  `/api/jobs` e `/api/jobs/{id}/events`.
+- Falantes desconhecidos ficam como `SPEAKER_XX`. Ao nomeá-los, a voz pode ser
+  reconhecida automaticamente em reuniões futuras conforme o limiar de
+  similaridade configurado. **Endpoint interno:** `/api/meetings/{id}/assign`.
+- Excluir uma reunião remove banco, markdown e mídia gerida. Mídia apenas
+  vinculada externamente não é apagada. **Endpoint interno:**
+  `DELETE /api/meetings/{id}`.
+<!-- business-readme:business-rules:end -->
+
+<!-- business-readme:technical:start -->
+
 ## Requisitos
 
 - Linux com GPU NVIDIA (testado: RTX 3060 12GB), `ffmpeg` no PATH
@@ -188,3 +219,5 @@ Env vars (`HF_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MEET_LLM_PROVIDER`
   ctranslate2 (faster-whisper); não troque para cu13x sem revalidar.
 - Dados: `~/.local/share/meet/meet.db` (SQLite + FTS5), embeddings pendentes em
   `~/.local/share/meet/pending/`.
+
+<!-- business-readme:technical:end -->

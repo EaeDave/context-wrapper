@@ -28,6 +28,7 @@ from meet.extract import (
     _parse_json_response,
     extract,
     get_provider,
+    validate_credentials,
     LLMProvider,
 )
 from meet.models import ActionItem, TranscriptSegment
@@ -293,6 +294,65 @@ def test_get_provider_ollama_does_not_require_key() -> None:
     s = Settings(llm_provider="ollama")
     provider = get_provider(s)  # must not raise
     assert provider is not None
+
+
+
+def test_validate_credentials_renova_oauth(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Preflight OAuth deve validar/renovar o token sem chamar o LLM."""
+    from meet.anthropic_oauth import save_tokens
+
+    settings = Settings(llm_provider="anthropic", data_dir=tmp_path)
+    save_tokens(
+        settings,
+        {"access": "a", "refresh": "r", "expires": 0},
+    )
+    calls: list[Settings] = []
+    monkeypatch.setattr(
+        "meet.anthropic_oauth.get_access_token",
+        lambda current: calls.append(current) or "access-novo",
+    )
+
+    validate_credentials(settings)
+
+    assert calls == [settings]
+
+
+def test_pipeline_valida_llm_antes_do_audio(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Credencial inválida deve falhar antes de preparar áudio ou carregar modelos."""
+    from meet import audio as audio_mod
+    from meet.pipeline import _analyse
+
+    audio_called = False
+
+    def prepare(*_args, **_kwargs):
+        nonlocal audio_called
+        audio_called = True
+
+    monkeypatch.setattr(audio_mod, "prepare", prepare)
+    monkeypatch.setattr(
+        extract_mod,
+        "validate_credentials",
+        lambda _settings: (_ for _ in ()).throw(ValueError("Reconecte sua conta")),
+    )
+    progress: list[str] = []
+
+    with pytest.raises(RuntimeError, match="Erro na autenticação LLM"):
+        _analyse(
+            video=tmp_path / "reuniao.mkv",
+            mic_track=1,
+            others_track=2,
+            no_llm=False,
+            settings=Settings(),
+            store=object(),  # type: ignore[arg-type]
+            workdir=tmp_path,
+            today="2026-07-14",
+            progress=progress.append,
+        )
+
+    assert progress == ["Validando acesso ao LLM…"]
+    assert audio_called is False
 
 
 # ---------------------------------------------------------------------------

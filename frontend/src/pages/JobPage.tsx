@@ -88,6 +88,10 @@ export default function JobPage() {
   }
 
   const isActive = job.status === "queued" || job.status === "running"
+  const needsAnthropicReconnect =
+    job.status === "error" &&
+    (job.error?.includes("invalid_grant") ||
+      job.error?.includes("Reconecte sua conta"))
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8">
@@ -176,6 +180,17 @@ export default function JobPage() {
                 <pre className="rounded-md bg-muted px-4 py-3 text-xs font-mono text-destructive overflow-x-auto whitespace-pre-wrap break-words">
                   {job.error}
                 </pre>
+              )}
+              {needsAnthropicReconnect && (
+                <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+                  Sua sessão Claude expirou. Reconecte a conta antes de tentar
+                  processar a reunião novamente.
+                </div>
+              )}
+              {needsAnthropicReconnect && (
+                <Button asChild>
+                  <Link to="/settings">Reconectar Claude</Link>
+                </Button>
               )}
               <Button variant="outline" size="sm" asChild>
                 <Link to="/new">

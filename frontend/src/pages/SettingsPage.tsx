@@ -350,35 +350,40 @@ export default function SettingsPage() {
                   </span>
                 )}
               </div>
-              <AlertDialog>
-                <AlertDialogTrigger asChild>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={disconnect.isPending}
-                  >
-                    Desconectar
-                  </Button>
-                </AlertDialogTrigger>
-                <AlertDialogContent>
-                  <AlertDialogHeader>
-                    <AlertDialogTitle>Desconectar conta Claude?</AlertDialogTitle>
-                    <AlertDialogDescription>
-                      Os tokens OAuth serão removidos. Você precisará reconectar
-                      para continuar usando o Claude via assinatura.
-                    </AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogCancel>Cancelar</AlertDialogCancel>
-                    <AlertDialogAction
-                      onClick={() => disconnect.mutate()}
-                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={openWizard}>
+                  Reconectar
+                </Button>
+                <AlertDialog>
+                  <AlertDialogTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={disconnect.isPending}
                     >
                       Desconectar
-                    </AlertDialogAction>
-                  </AlertDialogFooter>
-                </AlertDialogContent>
-              </AlertDialog>
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Desconectar conta Claude?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        Os tokens OAuth serão removidos. Você precisará reconectar
+                        para continuar usando o Claude via assinatura.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancelar</AlertDialogCancel>
+                      <AlertDialogAction
+                        onClick={() => disconnect.mutate()}
+                        className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                      >
+                        Desconectar
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+              </div>
             </div>
           ) : (
             <Button onClick={openWizard}>

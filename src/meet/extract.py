@@ -233,6 +233,16 @@ def get_provider(settings: Settings) -> LLMProvider:
     )
 
 
+
+def validate_credentials(settings: Settings) -> None:
+    """Valida credenciais antes das etapas caras do pipeline."""
+    provider = get_provider(settings)
+    if isinstance(provider, AnthropicOAuthProvider):
+        from .anthropic_oauth import get_access_token
+
+        get_access_token(settings)
+
+
 # ---------------------------------------------------------------------------
 # Helpers internos
 # ---------------------------------------------------------------------------
