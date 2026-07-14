@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import tempfile
+from collections.abc import Callable
 import json
 import subprocess
 from pathlib import Path
 
 from .models import AudioTracks
+
+AudioProgress = Callable[[float], None]
 
 _WAV_OPTS = ["-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le"]
 # Nivelamento de fala: vozes gravadas baixas (mic com pouco ganho, participante
@@ -45,11 +49,36 @@ def _probe_duration(input_path: Path) -> float:
     return float(data["format"]["duration"])
 
 
-def _run_ffmpeg(args: list[str]) -> None:
-    """Executa ffmpeg com -y; RuntimeError com stderr resumido se falhar."""
-    proc = subprocess.run(["ffmpeg", "-y"] + args, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg falhou: {proc.stderr[-500:]}")
+def _run_ffmpeg(
+    args: list[str],
+    *,
+    duration: float | None = None,
+    on_progress: AudioProgress | None = None,
+) -> None:
+    """Executa ffmpeg e reporta avanço temporal quando a duração é conhecida."""
+    with tempfile.TemporaryFile(mode="w+") as errors:
+        proc = subprocess.Popen(
+            ["ffmpeg", "-y", "-progress", "pipe:1", "-nostats", *args],
+            stdout=subprocess.PIPE,
+            stderr=errors,
+            text=True,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if not line.startswith("out_time_us=") or not duration or duration <= 0:
+                continue
+            try:
+                elapsed = int(line.split("=", 1)[1]) / 1_000_000
+            except ValueError:
+                continue
+            if on_progress is not None:
+                on_progress(min(elapsed / duration, 1.0))
+        returncode = proc.wait()
+        if returncode != 0:
+            errors.seek(0)
+            raise RuntimeError(f"ffmpeg falhou: {errors.read()[-500:]}")
+    if on_progress is not None:
+        on_progress(1.0)
 
 
 def prepare(
@@ -57,19 +86,36 @@ def prepare(
     workdir: Path,
     mic_track: int = 1,
     others_track: int = 2,
+    on_progress: AudioProgress | None = None,
 ) -> AudioTracks:
     """Extrai streams de áudio para wav 16 kHz mono pcm_s16le.
 
     1 stream → mic=None, others==mixed (mesmo arquivo wav).
-    ≥2 streams → mic e others separados (1-based) + mixdown completo via amix.
+    ≥2 streams → mic e others separados (1-based) em uma execução ffmpeg.
     """
     workdir.mkdir(parents=True, exist_ok=True)
     n_streams = probe_audio_streams(input_path)
     duration = _probe_duration(input_path)
 
+    command_count = 1
+    completed_commands = 0
+
+    def command_progress(fraction: float) -> None:
+        if on_progress is not None:
+            on_progress((completed_commands + fraction) / command_count)
+
+    def run(args: list[str]) -> None:
+        nonlocal completed_commands
+        _run_ffmpeg(
+            args,
+            duration=duration,
+            on_progress=command_progress,
+        )
+        completed_commands += 1
+
     if n_streams < 2:
         mixed = workdir / "mixed.wav"
-        _run_ffmpeg([
+        run([
             "-i", str(input_path),
             "-map", "0:a:0",
             "-af", _SPEECHNORM,
@@ -83,42 +129,23 @@ def prepare(
 
     mic_path = workdir / "mic.wav"
     others_path = workdir / "others.wav"
-    mixed_path = workdir / "mixed.wav"
 
-    _run_ffmpeg([
+    run([
         "-i", str(input_path),
         "-map", f"0:a:{mic_idx}",
         "-af", _SPEECHNORM,
         *_WAV_OPTS,
         str(mic_path),
-    ])
-
-    _run_ffmpeg([
-        "-i", str(input_path),
         "-map", f"0:a:{others_idx}",
         "-af", _SPEECHNORM,
         *_WAV_OPTS,
         str(others_path),
     ])
 
-    # Mixdown de todos os K streams via amix; nomeia saída para mapeamento explícito
-    stream_refs = "".join(f"[0:a:{i}]" for i in range(n_streams))
-    filter_str = (
-        f"{stream_refs}amix=inputs={n_streams}:duration=longest[mx];"
-        f"[mx]{_SPEECHNORM}[amixed]"
-    )
-    _run_ffmpeg([
-        "-i", str(input_path),
-        "-filter_complex", filter_str,
-        "-map", "[amixed]",
-        *_WAV_OPTS,
-        str(mixed_path),
-    ])
-
     return AudioTracks(
         mic=mic_path,
         others=others_path,
-        mixed=mixed_path,
+        mixed=others_path,
         duration=duration,
     )
 

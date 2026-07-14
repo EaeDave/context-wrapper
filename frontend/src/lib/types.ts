@@ -1,11 +1,32 @@
 export type JobStatus = "queued" | "running" | "done" | "error"
 
+export type ProgressStepState = "pending" | "running" | "done" | "error"
+
+export interface ProgressStep {
+  key: string
+  label: string
+  state: ProgressStepState
+  elapsed_seconds: number | null
+}
+
+/** Progresso estruturado de um job — contrato em src/meet/progress.py. */
+export interface ProgressUpdate {
+  percent: number              // 0..100, geral
+  step: string                 // key da etapa atual
+  step_label: string           // rótulo humano da etapa atual
+  step_percent: number | null  // 0..100 dentro da etapa; null = indeterminado
+  detail: string
+  steps: ProgressStep[]
+  elapsed_seconds: number
+}
+
 export interface Job {
   id: string             // 10 hex
-  kind: "process" | "mix"
+  kind: "process" | "mix" | "reprocess" | "reextract"
   label: string
   status: JobStatus
-  stage: string          // progresso textual
+  stage: string          // progresso textual (legado — nunca interpretar para calcular progresso)
+  progress: ProgressUpdate | null  // progresso estruturado; null em jobs legados/sem dados ainda
   error: string | null   // últimos 800 chars do traceback
   meeting_id: number | null   // preenchido quando process termina
   result_path: string | null  // .md gerado

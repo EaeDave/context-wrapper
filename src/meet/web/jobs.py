@@ -6,13 +6,16 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 import traceback
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+from ..progress import ProgressTracker, ProgressUpdate, StepSpec
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +41,7 @@ class Job:
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
     finished_at: str | None = None
+    progress: ProgressUpdate | None = None
     # params opacos pro worker
     params: dict[str, Any] = field(default_factory=dict)
 
@@ -54,14 +58,15 @@ CREATE TABLE IF NOT EXISTS jobs (
   result_path TEXT,
   created_at TEXT NOT NULL,
   finished_at TEXT,
-  params TEXT NOT NULL DEFAULT '{}'
+  params TEXT NOT NULL DEFAULT '{}',
+  progress_json TEXT
 );
 """
 
 _UPSERT = """
 INSERT INTO jobs (id, kind, label, status, stage, error, meeting_id, result_path,
-                  created_at, finished_at, params)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  created_at, finished_at, params, progress_json)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   status=excluded.status,
   stage=excluded.stage,
@@ -69,7 +74,8 @@ ON CONFLICT(id) DO UPDATE SET
   meeting_id=excluded.meeting_id,
   result_path=excluded.result_path,
   finished_at=excluded.finished_at,
-  params=excluded.params;
+  params=excluded.params,
+  progress_json=excluded.progress_json;
 """
 
 
@@ -77,6 +83,14 @@ def _row_to_job(row: sqlite3.Row) -> Job:
     params: dict = {}
     try:
         params = json.loads(row["params"] or "{}")
+    except Exception:
+        pass
+    progress: ProgressUpdate | None = None
+    try:
+        if "progress_json" in row.keys() and row["progress_json"]:
+            raw_progress = json.loads(row["progress_json"])
+            if isinstance(raw_progress, dict):
+                progress = ProgressUpdate.from_dict(raw_progress)
     except Exception:
         pass
     return Job(
@@ -91,6 +105,7 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         created_at=row["created_at"],
         finished_at=row["finished_at"],
         params=params,
+        progress=progress,
     )
 
 
@@ -114,6 +129,12 @@ class JobManager:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout = 5000")
             conn.execute(_CREATE_TABLE)
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            if "progress_json" not in columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN progress_json TEXT")
             conn.commit()
             self._conn = conn
         except Exception:
@@ -145,6 +166,7 @@ class JobManager:
             job.created_at,
             job.finished_at,
             json.dumps(job.params),
+            json.dumps(job.progress.to_dict()) if job.progress is not None else None,
         )
         try:
             with self._db_lock:
@@ -178,6 +200,8 @@ class JobManager:
                 job.stage = "Interrompido"
                 job.error = "Interrompido por reinício do servidor"
                 job.finished_at = now
+                if job.progress is not None:
+                    job.progress = job.progress.failed(job.error)
                 stuck.append(job)
             self._jobs[job.id] = job
             self._order.append(job.id)
@@ -232,6 +256,18 @@ class JobManager:
                 self._run(job)
                 with self._lock:
                     job.status = JobStatus.done
+                    if job.progress is not None:
+                        job.progress = replace(
+                            job.progress,
+                            percent=100.0,
+                            step_percent=100.0,
+                            steps=tuple(
+                                step
+                                if step.state == "error"
+                                else replace(step, state="done")
+                                for step in job.progress.steps
+                            ),
+                        )
                     job.finished_at = datetime.now(timezone.utc).isoformat(
                         timespec="seconds"
                     )
@@ -241,6 +277,8 @@ class JobManager:
                     job.status = JobStatus.error
                     job.error = f"{exc}\n{traceback.format_exc()[-800:]}"
                     job.stage = "Falhou"
+                    if job.progress is not None:
+                        job.progress = job.progress.failed(str(exc))
                     job.finished_at = datetime.now(timezone.utc).isoformat(
                         timespec="seconds"
                     )
@@ -253,10 +291,31 @@ class JobManager:
         settings = load_settings()
         store = Store(settings.db_path)
 
-        def progress(msg: str) -> None:
+        last_persisted_progress: ProgressUpdate | None = None
+        last_progress_commit = 0.0
+
+        def progress(update: ProgressUpdate) -> None:
+            nonlocal last_persisted_progress, last_progress_commit
+            now = time.monotonic()
             with self._lock:
-                job.stage = msg
-            self._persist(job)
+                job.progress = update
+                job.stage = update.detail
+            elapsed = now - last_progress_commit
+            delta = (
+                abs(update.percent - last_persisted_progress.percent)
+                if last_persisted_progress is not None
+                else 100.0
+            )
+            should_persist = (
+                last_persisted_progress is None
+                or update.step != last_persisted_progress.step
+                or elapsed >= 2.0
+                or (elapsed >= 0.5 and delta >= 0.5)
+            )
+            if should_persist:
+                self._persist(job)
+                last_persisted_progress = update
+                last_progress_commit = now
 
         if job.kind == "process":
             from ..pipeline import run_pipeline
@@ -286,11 +345,19 @@ class JobManager:
                 ensure_listen_mix,
                 ensure_listen_preview,
             )
+            tracker = ProgressTracker(
+                (
+                    StepSpec("preview_full", "Preview original", 1.0),
+                    StepSpec("preview_web", "Preview web", 1.0),
+                    StepSpec("audio_mix", "Mix de áudio", 1.0),
+                ),
+                progress,
+            )
 
             video = Path(job.params["video"])
             mic = int(job.params.get("mic_track", 1))
             others = int(job.params.get("others_track", 2))
-            progress("Gerando preview original (full)…")
+            tracker.start("preview_full", "Gerando preview original (full)…", determinate=False)
             try:
                 out = ensure_listen_preview(
                     video,
@@ -299,7 +366,7 @@ class JobManager:
                     others_track=others,
                     quality=PREVIEW_FULL,
                 )
-                progress("Gerando preview leve (web)…")
+                tracker.start("preview_web", "Gerando preview leve (web)…", determinate=False)
                 ensure_listen_preview(
                     video,
                     force=True,
@@ -308,15 +375,16 @@ class JobManager:
                     quality=PREVIEW_WEB,
                 )
             except Exception:
-                progress("Sem vídeo — gerando só áudio…")
+                tracker.start("audio_mix", "Sem vídeo — gerando só áudio…", determinate=False)
                 out = ensure_listen_mix(
                     video, force=True, mic_track=mic, others_track=others
                 )
             else:
-                progress("Gerando mix só de áudio…")
+                tracker.start("audio_mix", "Gerando mix só de áudio…", determinate=False)
                 ensure_listen_mix(
                     video, force=True, mic_track=mic, others_track=others
                 )
+            tracker.finish("Mix concluído")
             with self._lock:
                 job.result_path = str(out)
             return

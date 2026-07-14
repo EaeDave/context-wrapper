@@ -63,19 +63,32 @@ def _save_minimal(store: Store) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _make_diarize_test(num_speakers: int) -> list[dict]:
-    """Helper: patches pyannote Pipeline to capture pipe() call args, returns calls list."""
+def _make_diarize_test(
+    num_speakers: int,
+    *,
+    pipe_error: Exception | None = None,
+    empty_cache: MagicMock | None = None,
+    gc_collect: MagicMock | None = None,
+    pipeline_released: MagicMock | None = None,
+) -> list[dict]:
+    """Patch pyannote and torch, run diarize, and return pipeline calls."""
     import sys
+    import weakref
     import meet.diarize as diarize_mod
 
     calls: list[dict] = []
 
     class FakePipeline:
+        def __init__(self) -> None:
+            if pipeline_released is not None:
+                weakref.finalize(self, pipeline_released)
         def to(self, device):
             return self
 
         def __call__(self, path, **kwargs):
             calls.append({"path": path, "kwargs": kwargs})
+            if pipe_error is not None:
+                raise pipe_error
             ann = MagicMock()
             ann.itertracks.return_value = []
             ann.labels.return_value = []
@@ -84,15 +97,20 @@ def _make_diarize_test(num_speakers: int) -> list[dict]:
             out.speaker_embeddings = None
             return out
 
-    fake_pipe = FakePipeline()
 
     # pyannote.audio.Pipeline is imported lazily inside diarize(); patch the module
     fake_pyannote_audio = types.ModuleType("pyannote.audio")
     fake_pyannote_audio.Pipeline = MagicMock(  # type: ignore[attr-defined]
-        from_pretrained=MagicMock(return_value=fake_pipe)
+        from_pretrained=MagicMock(
+            side_effect=lambda *_args, **_kwargs: FakePipeline()
+        )
     )
     fake_torch = types.ModuleType("torch")
     fake_torch.device = lambda d: d  # type: ignore[attr-defined]
+    fake_torch.cuda = types.SimpleNamespace(  # type: ignore[attr-defined]
+        is_available=MagicMock(return_value=True),
+        empty_cache=empty_cache or MagicMock(),
+    )
 
     original_pyannote = sys.modules.get("pyannote.audio")
     original_torch = sys.modules.get("torch")
@@ -106,7 +124,8 @@ def _make_diarize_test(num_speakers: int) -> list[dict]:
         settings = MagicMock()
         settings.hf_token = "tok"
         settings.device = "cpu"
-        diarize_mod.diarize(wav, settings, num_speakers=num_speakers)
+        with patch.object(diarize_mod.gc, "collect", gc_collect or MagicMock()):
+            diarize_mod.diarize(wav, settings, num_speakers=num_speakers)
     finally:
         if original_pyannote is not None:
             sys.modules["pyannote.audio"] = original_pyannote
@@ -132,6 +151,49 @@ def test_diarize_no_num_speakers_kwarg_when_zero() -> None:
     calls = _make_diarize_test(num_speakers=0)
     assert len(calls) == 1
     assert "num_speakers" not in calls[0]["kwargs"]
+
+
+def test_diarize_cleans_pipeline_and_cuda_on_success() -> None:
+    gc_collect = MagicMock()
+    empty_cache = MagicMock()
+    pipeline_released = MagicMock()
+
+    _make_diarize_test(
+        0,
+        gc_collect=gc_collect,
+        empty_cache=empty_cache,
+        pipeline_released=pipeline_released,
+    )
+
+    pipeline_released.assert_called_once_with()
+    gc_collect.assert_called_once_with()
+    empty_cache.assert_called_once_with()
+
+
+def test_diarize_cleans_pipeline_and_cuda_without_masking_error() -> None:
+    pipeline_error = RuntimeError("diarization failed")
+    gc_collect = MagicMock(side_effect=RuntimeError("gc cleanup failed"))
+    empty_cache = MagicMock(side_effect=RuntimeError("cuda cleanup failed"))
+    pipeline_released = MagicMock()
+
+    with pytest.raises(RuntimeError, match="diarization failed") as exc_info:
+        _make_diarize_test(
+            0,
+            pipe_error=pipeline_error,
+            gc_collect=gc_collect,
+            empty_cache=empty_cache,
+            pipeline_released=pipeline_released,
+        )
+
+    assert exc_info.value is pipeline_error
+    pipeline_error.__traceback__ = None
+    del exc_info
+    import gc
+
+    gc.collect()
+    pipeline_released.assert_called_once_with()
+    gc_collect.assert_called_once_with()
+    empty_cache.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------

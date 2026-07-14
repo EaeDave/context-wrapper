@@ -6,7 +6,7 @@
 ## Current business rule map
 
 - Pipeline and optional LLM behavior → `README.md#regras-do-produto`, `src/meet/pipeline.py`, `tests/test_extract.py`; **job interno:** `process`.
-- Job lifecycle and interruption recovery → `README.md#regras-do-produto`, `src/meet/web/jobs.py`, `tests/test_jobs.py`; **endpoints internos:** `/api/jobs/*`.
+- Job lifecycle, structured progress, and interruption recovery → `README.md#regras-do-produto`, `src/meet/progress.py`, `src/meet/web/jobs.py`, `tests/test_progress.py`, `tests/test_jobs.py`; **endpoints internos:** `/api/jobs/*`.
 - Claude OAuth connection lifecycle → `README.md#regras-do-produto`, `src/meet/anthropic_oauth.py`, `tests/test_settings_local.py`; **endpoints internos:** `/api/auth/anthropic/*`.
 
 ## Non-inferable technical facts
@@ -22,4 +22,5 @@
 
 - Validate LLM credentials before audio/model work so auth failures do not waste a long transcription run.
 - OAuth refresh is serialized inside the server process and credentials are re-read after acquiring the lock to avoid consuming one rotating token twice.
+- Progress is hybrid by design: report observed work inside measurable stages and keep blocking operations indeterminate rather than deriving an ETA from historical guesses.
 <!-- business-readme:context:end -->

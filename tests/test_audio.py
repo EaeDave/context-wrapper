@@ -2,9 +2,9 @@
 
 Contracts defended:
 - Single audio stream → mic=None, others is mixed, both point at the same file.
-- Two+ audio streams → mic and others are distinct WAV files; mixed is a
-  third distinct file (amix output); all three are 16 kHz mono pcm_s16le.
-- duration field is populated (positive float).
+- Two+ audio streams → one ffmpeg extraction emits distinct mic/others WAVs;
+  mixed aliases others and no redundant third WAV is created.
+- Outputs are 16 kHz mono pcm_s16le and duration is positive.
 
 All tests require ffmpeg; they are skipped when it is absent.
 """
@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+import meet.audio as audio
 from meet.audio import (
     PREVIEW_FULL,
     PREVIEW_WEB,
@@ -74,10 +75,10 @@ def _make_two_stream_mkv(path: Path, duration: float = 1.0) -> None:
     )
 
 
-def _wav_info(path: Path) -> tuple[int, int]:
-    """Return (nchannels, framerate) of a WAV file."""
+def _wav_info(path: Path) -> tuple[int, int, int]:
+    """Return (channels, framerate, sample width) of a WAV file."""
     with wave.open(str(path), "rb") as w:
-        return w.getnchannels(), w.getframerate()
+        return w.getnchannels(), w.getframerate(), w.getsampwidth()
 
 
 # ---------------------------------------------------------------------------
@@ -109,9 +110,8 @@ def test_prepare_single_track_output_is_16k_mono(tmp_path: Path) -> None:
     _make_sine_wav(src)
 
     tracks = prepare(src, tmp_path / "work")
-    ch, rate = _wav_info(tracks.others)
-    assert ch == 1
-    assert rate == 16000
+    channels, rate, sample_width = _wav_info(tracks.others)
+    assert (channels, rate, sample_width) == (1, 16000, 2)
 
 
 def test_prepare_single_track_duration_positive(tmp_path: Path) -> None:
@@ -121,6 +121,18 @@ def test_prepare_single_track_duration_positive(tmp_path: Path) -> None:
     tracks = prepare(src, tmp_path / "work")
     assert tracks.duration > 0.0
 
+
+
+def test_prepare_reporta_progresso_monotono(tmp_path: Path) -> None:
+    src = tmp_path / "source.wav"
+    _make_sine_wav(src, duration=2.0)
+    updates: list[float] = []
+
+    prepare(src, tmp_path / "work", on_progress=updates.append)
+
+    assert updates
+    assert updates == sorted(updates)
+    assert updates[-1] == 1.0
 
 # ---------------------------------------------------------------------------
 # Two-track case
@@ -134,14 +146,16 @@ def test_prepare_two_tracks_mic_is_not_none(tmp_path: Path) -> None:
     assert tracks.mic is not None
 
 
-def test_prepare_two_tracks_three_distinct_files(tmp_path: Path) -> None:
-    """mic, others, and mixed are three different file paths."""
+def test_prepare_two_tracks_emits_only_mic_and_others(tmp_path: Path) -> None:
     src = tmp_path / "meeting.mkv"
     _make_two_stream_mkv(src)
+    workdir = tmp_path / "work"
 
-    tracks = prepare(src, tmp_path / "work")
-    paths = {tracks.mic, tracks.others, tracks.mixed}
-    assert len(paths) == 3
+    tracks = prepare(src, workdir)
+
+    assert tracks.mic != tracks.others
+    assert tracks.mixed == tracks.others
+    assert {path.name for path in workdir.iterdir()} == {"mic.wav", "others.wav"}
 
 
 def test_prepare_two_tracks_all_files_exist(tmp_path: Path) -> None:
@@ -160,9 +174,8 @@ def test_prepare_two_tracks_mic_is_16k_mono(tmp_path: Path) -> None:
 
     tracks = prepare(src, tmp_path / "work")
     assert tracks.mic is not None
-    ch, rate = _wav_info(tracks.mic)
-    assert ch == 1
-    assert rate == 16000
+    channels, rate, sample_width = _wav_info(tracks.mic)
+    assert (channels, rate, sample_width) == (1, 16000, 2)
 
 
 def test_prepare_two_tracks_others_is_16k_mono(tmp_path: Path) -> None:
@@ -170,19 +183,31 @@ def test_prepare_two_tracks_others_is_16k_mono(tmp_path: Path) -> None:
     _make_two_stream_mkv(src)
 
     tracks = prepare(src, tmp_path / "work")
-    ch, rate = _wav_info(tracks.others)
-    assert ch == 1
-    assert rate == 16000
+    channels, rate, sample_width = _wav_info(tracks.others)
+    assert (channels, rate, sample_width) == (1, 16000, 2)
 
 
-def test_prepare_two_tracks_mixed_is_16k_mono(tmp_path: Path) -> None:
+def test_prepare_two_tracks_runs_one_ffmpeg_with_monotonic_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     src = tmp_path / "meeting.mkv"
-    _make_two_stream_mkv(src)
+    _make_two_stream_mkv(src, duration=2.0)
+    updates: list[float] = []
+    calls = 0
+    original_run_ffmpeg = audio._run_ffmpeg
 
-    tracks = prepare(src, tmp_path / "work")
-    ch, rate = _wav_info(tracks.mixed)
-    assert ch == 1
-    assert rate == 16000
+    def counting_run_ffmpeg(*args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        original_run_ffmpeg(*args, **kwargs)
+
+    monkeypatch.setattr(audio, "_run_ffmpeg", counting_run_ffmpeg)
+    prepare(src, tmp_path / "work", on_progress=updates.append)
+
+    assert calls == 1
+    assert updates
+    assert updates == sorted(updates)
+    assert updates[-1] == 1.0
 
 
 def test_prepare_two_tracks_duration_positive(tmp_path: Path) -> None:

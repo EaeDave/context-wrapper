@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..config import hf_token_source, load_settings, save_local_settings
+from ..progress import ProgressUpdate
 from ..store import Store
 from ..anthropic_oauth import (
     build_authorize_url,
@@ -106,6 +107,7 @@ def _serialize_job(job: Job) -> dict:
         "result_path": job.result_path,
         "created_at": job.created_at,
         "finished_at": job.finished_at,
+        "progress": job.progress.to_dict() if job.progress is not None else None,
     }
 
 
@@ -566,6 +568,7 @@ def create_app() -> FastAPI:
             last_status: JobStatus | None = None
             last_stage: str | None = None
             last_error: str | None = None
+            last_progress: ProgressUpdate | None = None
 
             while True:
                 job = manager.get(job_id)
@@ -576,11 +579,13 @@ def create_app() -> FastAPI:
                     job.status != last_status
                     or job.stage != last_stage
                     or job.error != last_error
+                    or job.progress != last_progress
                 )
                 if changed:
                     last_status = job.status
                     last_stage = job.stage
                     last_error = job.error
+                    last_progress = job.progress
                     yield f"data: {json.dumps(_serialize_job(job))}\n\n"
 
                     if job.status in (JobStatus.done, JobStatus.error):

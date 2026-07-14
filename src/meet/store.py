@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -346,12 +347,20 @@ class Store:
                 ),
             )
 
-    def adopt_media(self, meeting_id: int, data_dir: Path, origin: Path) -> Path:
+    def adopt_media(
+        self,
+        meeting_id: int,
+        data_dir: Path,
+        origin: Path,
+        on_progress: Callable[[float], None] | None = None,
+    ) -> Path:
         """Importa origin para media/{id}/ e atualiza o registro."""
         from . import media as media_mod
 
         origin = Path(origin).expanduser()
-        dest = media_mod.import_original(data_dir, meeting_id, origin)
+        dest = media_mod.import_original(
+            data_dir, meeting_id, origin, on_progress=on_progress
+        )
         self.set_media(
             meeting_id,
             source=dest,

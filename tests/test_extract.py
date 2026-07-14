@@ -336,7 +336,16 @@ def test_pipeline_valida_llm_antes_do_audio(
         "validate_credentials",
         lambda _settings: (_ for _ in ()).throw(ValueError("Reconecte sua conta")),
     )
-    progress: list[str] = []
+    from meet.progress import ProgressTracker, StepSpec
+
+    updates = []
+    tracker = ProgressTracker(
+        (
+            StepSpec("auth", "Validar acesso ao LLM", 1.0),
+            StepSpec("audio", "Preparar áudio", 1.0),
+        ),
+        updates.append,
+    )
 
     with pytest.raises(RuntimeError, match="Erro na autenticação LLM"):
         _analyse(
@@ -348,10 +357,11 @@ def test_pipeline_valida_llm_antes_do_audio(
             store=object(),  # type: ignore[arg-type]
             workdir=tmp_path,
             today="2026-07-14",
-            progress=progress.append,
+            tracker=tracker,
         )
 
-    assert progress == ["Validando acesso ao LLM…"]
+    assert updates[-1].step == "auth"
+    assert updates[-1].detail == "Validando acesso ao LLM"
     assert audio_called is False
 
 

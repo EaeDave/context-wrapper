@@ -90,8 +90,18 @@ def process(
         err_console.print(f"[red]Erro ao carregar configurações:[/red] {exc}")
         raise typer.Exit(1)
 
-    def on_progress(msg: str) -> None:
-        console.print(f"[cyan]{msg}[/cyan]")
+    last_step = ""
+    last_bucket = -1
+
+    def on_progress(update) -> None:
+        nonlocal last_step, last_bucket
+        bucket = int(update.percent // 10)
+        if update.step == last_step and bucket == last_bucket:
+            return
+        last_step = update.step
+        last_bucket = bucket
+        suffix = f" ({update.percent:.0f}%)" if update.step_percent is not None else ""
+        console.print(f"[cyan]{update.detail}{suffix}[/cyan]")
 
     try:
         meeting_id, result, md_path = run_pipeline(

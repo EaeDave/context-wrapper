@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import { Progress } from "@/components/ui/progress"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
@@ -194,24 +195,45 @@ export default function MeetingsPage() {
             Jobs recentes
           </p>
           <div className="flex flex-wrap gap-2">
-            {jobs.map((job) => (
-              <button
-                key={job.id}
-                onClick={() => navigate(`/jobs/${job.id}`)}
-                className="flex items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm transition-colors hover:bg-accent/10 text-left"
-              >
-                <span className="max-w-[120px] truncate font-medium">
-                  {job.label}
-                </span>
-                <Badge variant="outline" className="shrink-0 text-xs">
-                  {job.kind}
-                </Badge>
-                <span className="max-w-[100px] truncate text-xs text-muted-foreground">
-                  {job.stage}
-                </span>
-                <JobStatusBadge status={job.status} />
-              </button>
-            ))}
+            {jobs.map((job) => {
+              const percent =
+                job.status === "done" ? 100 : job.progress?.percent ?? 0
+              return (
+                <button
+                  key={job.id}
+                  onClick={() => navigate(`/jobs/${job.id}`)}
+                  className="flex w-full flex-col gap-1.5 rounded-lg border bg-card px-3 py-2 text-left text-sm transition-colors hover:bg-accent/10 sm:w-56"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate font-medium">
+                      {job.label}
+                    </span>
+                    <Badge variant="outline" className="shrink-0 text-xs">
+                      {job.kind}
+                    </Badge>
+                    <JobStatusBadge status={job.status} />
+                  </div>
+                  {job.progress ? (
+                    <div className="flex items-center gap-2">
+                      <Progress
+                        value={percent}
+                        className="h-1.5 flex-1"
+                        aria-label={`Progresso: ${job.progress.step_label || job.label}`}
+                      />
+                      <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                        {Math.round(percent)}%
+                      </span>
+                    </div>
+                  ) : (
+                    job.stage && (
+                      <span className="truncate text-xs text-muted-foreground">
+                        {job.stage}
+                      </span>
+                    )
+                  )}
+                </button>
+              )
+            })}
           </div>
         </div>
       )}

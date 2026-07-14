@@ -11,13 +11,36 @@ from typing import Any
 
 from .config import Settings
 from .models import ActionItem, MeetingResult
+from .progress import ProgressCallback, ProgressTracker, StepSpec
 from .store import Store
 
-ProgressCb = Callable[[str], None]
+
+def _process_plan(*, no_llm: bool, import_media: bool) -> tuple[StepSpec, ...]:
+    steps: list[StepSpec] = []
+    if not no_llm:
+        steps.append(StepSpec("auth", "Validar acesso ao LLM", 2.0))
+    steps.extend(
+        (
+            StepSpec("audio", "Preparar áudio", 7.0),
+            StepSpec("transcribe", "Transcrever áudio", 55.0),
+            StepSpec("diarize", "Identificar falantes", 22.0),
+            StepSpec("speakers", "Reconhecer vozes", 4.0),
+        )
+    )
+    if not no_llm:
+        steps.append(StepSpec("llm", "Gerar resumo e tarefas", 5.0))
+    steps.append(StepSpec("save", "Salvar reunião", 2.0))
+    if import_media:
+        steps.append(StepSpec("import", "Importar mídia", 3.0))
+    return tuple(steps)
 
 
-def _noop(_: str) -> None:
-    return None
+def _fmt_progress_time(seconds: float, duration: float) -> str:
+    def fmt(value: float) -> str:
+        minutes, secs = divmod(max(int(value), 0), 60)
+        return f"{minutes:02d}:{secs:02d}"
+
+    return f"{fmt(seconds)} de {fmt(duration)} de áudio"
 
 
 def run_pipeline(
@@ -32,24 +55,17 @@ def run_pipeline(
     keep_wav: bool = False,
     import_media: bool = True,
     today: str | None = None,
-    on_progress: ProgressCb | None = None,
+    on_progress: ProgressCallback | None = None,
     num_speakers: int = 0,
 ) -> tuple[int, MeetingResult, Path]:
-    """Processa gravação de ponta a ponta.
-
-    Returns:
-        (meeting_id, result, md_path)
-
-    Se ``import_media`` (default), copia o vídeo para
-    ``~/.local/share/meet/media/{id}/original.ext`` e atualiza o SQLite.
-
-    Raises:
-        FileNotFoundError, RuntimeError, ValueError — erros de pipeline.
-    """
+    """Processa gravação de ponta a ponta com progresso estruturado."""
     if not video.exists():
         raise FileNotFoundError(f"Arquivo não encontrado: {video}")
 
-    progress = on_progress or _noop
+    tracker = ProgressTracker(
+        _process_plan(no_llm=no_llm, import_media=import_media),
+        on_progress,
+    )
     workdir = Path(tempfile.mkdtemp(prefix="meet-"))
     try:
         return _run(
@@ -63,7 +79,7 @@ def run_pipeline(
             store=store,
             workdir=workdir,
             today=today or date.today().isoformat(),
-            progress=progress,
+            tracker=tracker,
             num_speakers=num_speakers,
         )
     finally:
@@ -81,15 +97,11 @@ def _analyse(
     store: Store,
     workdir: Path,
     today: str,
-    progress: ProgressCb,
+    tracker: ProgressTracker,
     title: str | None = None,
     num_speakers: int = 0,
 ) -> tuple[MeetingResult, dict[str, Any], list[str]]:
-    """Faz análise completa (audio→transcribe→diarize→merge→llm) sem salvar no banco.
-
-    Retorna (result, embeddings, unresolved_labels).
-    """
-    # Imports pesados (torch/whisper/pyannote) só aqui
+    """Executa áudio → transcrição → diarização → merge → LLM, sem persistir."""
     from . import audio as audio_mod
     from . import diarize as diarize_mod
     from . import merge as merge_mod
@@ -99,62 +111,121 @@ def _analyse(
     if not no_llm:
         from . import extract as extract_mod
 
-        progress("Validando acesso ao LLM…")
+        tracker.start("auth", "Validando acesso ao LLM")
         try:
             extract_mod.validate_credentials(settings)
         except Exception as exc:
             raise RuntimeError(f"Erro na autenticação LLM: {exc}") from exc
+        tracker.update(1.0, "Acesso ao LLM validado")
 
-    progress("Preparando áudio…")
+    tracker.start("audio", "Preparando faixas de áudio")
     try:
-        tracks = audio_mod.prepare(video, workdir, mic_track, others_track)
+        tracks = audio_mod.prepare(
+            video,
+            workdir,
+            mic_track,
+            others_track,
+            on_progress=lambda fraction: tracker.update(
+                fraction, "Preparando faixas de áudio"
+            ),
+        )
     except Exception as exc:
         raise RuntimeError(f"Erro ao preparar áudio: {exc}") from exc
 
     embeddings: dict[str, Any] = {}
+    tracker.start("transcribe", "Transcrevendo áudio")
+    duration = tracks.duration
+
+    def transcription_progress(
+        offset: float,
+        span: float,
+        label: str,
+    ) -> Callable[[float, float], None]:
+        return lambda fraction, seconds: tracker.update(
+            offset + span * fraction,
+            f"{label} · {_fmt_progress_time(seconds, duration)}",
+        )
 
     if tracks.mic is not None:
-        progress("Transcrevendo microfone…")
+        _model = transcribe_mod.load_model(settings)
         try:
-            mic_segs = transcribe_mod.transcribe(tracks.mic, settings)
-        except Exception as exc:
-            raise RuntimeError(f"Erro ao transcrever microfone: {exc}") from exc
+            try:
+                mic_segs = transcribe_mod.transcribe_wav(
+                    _model,
+                    tracks.mic,
+                    settings,
+                    on_progress=transcription_progress(
+                        0.0, 0.5, "Transcrevendo microfone"
+                    ),
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Erro ao transcrever microfone: {exc}") from exc
 
-        progress("Transcrevendo outros participantes…")
+            try:
+                others_segs = transcribe_mod.transcribe_wav(
+                    _model,
+                    tracks.others,
+                    settings,
+                    on_progress=transcription_progress(
+                        0.5, 0.5, "Transcrevendo participantes"
+                    ),
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Erro ao transcrever outros participantes: {exc}"
+                ) from exc
+        finally:
+            transcribe_mod.release_model(_model)
+        diarize_input = tracks.others
+    else:
         try:
-            others_segs = transcribe_mod.transcribe(tracks.others, settings)
+            segments = transcribe_mod.transcribe(
+                tracks.mixed,
+                settings,
+                on_progress=transcription_progress(
+                    0.0, 1.0, "Transcrevendo reunião"
+                ),
+            )
         except Exception as exc:
-            raise RuntimeError(
-                f"Erro ao transcrever outros participantes: {exc}"
-            ) from exc
+            raise RuntimeError(f"Erro ao transcrever: {exc}") from exc
+        diarize_input = tracks.mixed
 
-        progress("Diarizando falantes…")
-        try:
-            turns, embeddings = diarize_mod.diarize(tracks.others, settings, num_speakers=num_speakers)
-        except Exception as exc:
-            raise RuntimeError(f"Erro na diarização: {exc}") from exc
+    tracker.start("diarize", "Carregando identificação de falantes", determinate=False)
+    diarize_ranges = {
+        "segmentation": (0.0, 0.55),
+        "speaker_counting": (0.55, 0.05),
+        "embeddings": (0.60, 0.32),
+        "discrete_diarization": (0.92, 0.08),
+    }
 
+    def diarize_progress(
+        key: str,
+        label: str,
+        fraction: float | None,
+    ) -> None:
+        start, span = diarize_ranges.get(key, (0.0, 1.0))
+        tracker.update(
+            None if fraction is None else start + span * fraction,
+            label,
+        )
+
+    try:
+        turns, embeddings = diarize_mod.diarize(
+            diarize_input,
+            settings,
+            num_speakers=num_speakers,
+            on_progress=diarize_progress,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Erro na diarização: {exc}") from exc
+
+    if tracks.mic is not None:
         others_segs = merge_mod.assign_speakers(others_segs, turns)
         segments = merge_mod.combine(mic_segs, others_segs)
     else:
-        progress(
-            "1 track só — sem separação automática da sua voz ('me'). "
-            "Transcrevendo…"
-        )
-        try:
-            segments = transcribe_mod.transcribe(tracks.mixed, settings)
-        except Exception as exc:
-            raise RuntimeError(f"Erro ao transcrever: {exc}") from exc
-
-        progress("Diarizando falantes…")
-        try:
-            turns, embeddings = diarize_mod.diarize(tracks.mixed, settings, num_speakers=num_speakers)
-        except Exception as exc:
-            raise RuntimeError(f"Erro na diarização: {exc}") from exc
-
         segments = merge_mod.assign_speakers(segments, turns)
 
-    progress("Resolvendo falantes no banco de vozes…")
+    tracker.start("speakers", "Reconhecendo vozes conhecidas", determinate=False)
     mapping_with_scores = voicebank_mod.resolve_with_scores(
         embeddings, store, settings.similarity_threshold
     )
@@ -167,13 +238,17 @@ def _analyse(
     }
     segments = merge_mod.rename_speakers(segments, mapping)
     participants = sorted({s.speaker for s in segments if s.speaker})
+    tracker.update(1.0, "Vozes reconhecidas")
 
     summary = ""
     action_items: list[ActionItem] = []
     suggested_title = ""
-
     if not no_llm:
-        progress("Extraindo resumo e action items (LLM)…")
+        tracker.start(
+            "llm",
+            "Gerando resumo e tarefas com LLM",
+            determinate=False,
+        )
         from . import extract as extract_mod
 
         try:
@@ -198,6 +273,23 @@ def _analyse(
     return result, embeddings, unresolved
 
 
+def _save_pending(
+    meeting_id: int,
+    embeddings: dict[str, Any],
+    unresolved: list[str],
+    data_dir: Path,
+) -> None:
+    if not unresolved:
+        return
+    import numpy as np
+
+    pending_dir = data_dir / "pending"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    pending_data = {label: embeddings[label] for label in unresolved if label in embeddings}
+    if pending_data:
+        np.savez(str(pending_dir / f"{meeting_id}.npz"), **pending_data)
+
+
 def _run(
     *,
     video: Path,
@@ -210,7 +302,7 @@ def _run(
     store: Store,
     workdir: Path,
     today: str,
-    progress: ProgressCb,
+    tracker: ProgressTracker,
     num_speakers: int = 0,
 ) -> tuple[int, MeetingResult, Path]:
     from . import render as render_mod
@@ -224,39 +316,36 @@ def _run(
         store=store,
         workdir=workdir,
         today=today,
-        progress=progress,
+        tracker=tracker,
         title=title,
         num_speakers=num_speakers,
     )
 
-    progress("Salvando markdown e banco…")
+    tracker.start("save", "Salvando markdown e banco")
     md_content = render_mod.to_markdown(result)
     filename = render_mod.meeting_filename(result)
     md_path = settings.output_dir / filename
     md_path.write_text(md_content, encoding="utf-8")
     meeting_id = store.save_meeting(result, md_path)
+    _save_pending(meeting_id, embeddings, unresolved, settings.data_dir)
+    tracker.update(1.0, "Reunião salva")
 
     if import_media:
-        progress("Importando vídeo para o meet (media/{id})…")
+        tracker.start("import", "Importando mídia para o acervo")
         try:
-            dest = store.adopt_media(meeting_id, settings.data_dir, video)
+            dest = store.adopt_media(
+                meeting_id,
+                settings.data_dir,
+                video,
+                on_progress=lambda fraction: tracker.update(
+                    fraction, "Importando mídia para o acervo"
+                ),
+            )
             result.source = str(dest)
         except Exception as exc:
-            # Pipeline ok; import falhou — reunião fica com path externo
-            progress(f"Aviso: não importou mídia ({exc})")
+            tracker.mark_current_error(f"Mídia não importada: {exc}")
 
-    if unresolved:
-        import numpy as np
-
-        pending_dir = settings.data_dir / "pending"
-        pending_dir.mkdir(parents=True, exist_ok=True)
-        pending_data = {
-            lbl: embeddings[lbl] for lbl in unresolved if lbl in embeddings
-        }
-        if pending_data:
-            np.savez(str(pending_dir / f"{meeting_id}.npz"), **pending_data)
-
-    progress(f"Concluído — reunião #{meeting_id}")
+    tracker.finish(f"Concluído — reunião #{meeting_id}")
     return meeting_id, result, md_path
 
 
@@ -268,27 +357,22 @@ def reprocess_meeting(
     mic_track: int = 1,
     others_track: int = 2,
     no_llm: bool = False,
-    on_progress: ProgressCb | None = None,
+    on_progress: ProgressCallback | None = None,
     num_speakers: int = 0,
 ) -> MeetingResult:
-    """Reprocessa reunião existente in-place (áudio completo → replace_meeting_content).
-
-    Preserva title do usuário, source, date e media. Grava pending .npz para
-    labels não resolvidos. Regenera o .md.
-    """
-    from . import render as render_mod
-
-    progress = on_progress or _noop
+    """Reprocessa reunião existente in-place, preservando metadados do usuário."""
     existing = store.get_meeting(meeting_id)
     if existing is None:
         raise ValueError(f"Reunião #{meeting_id} não encontrada")
 
     source = Path(existing.source).expanduser()
     if not source.is_file():
-        raise FileNotFoundError(
-            f"Arquivo fonte não encontrado: {existing.source}"
-        )
+        raise FileNotFoundError(f"Arquivo fonte não encontrado: {existing.source}")
 
+    tracker = ProgressTracker(
+        _process_plan(no_llm=no_llm, import_media=False),
+        on_progress,
+    )
     workdir = Path(tempfile.mkdtemp(prefix="meet-reprocess-"))
     try:
         result, embeddings, unresolved = _analyse(
@@ -300,34 +384,18 @@ def reprocess_meeting(
             store=store,
             workdir=workdir,
             today=existing.date,
-            progress=progress,
+            tracker=tracker,
             num_speakers=num_speakers,
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
-    # Preservar o title existente (não sobrescrever com sugestão do LLM)
     result.title = existing.title
-
-    progress("Salvando resultado no banco…")
+    tracker.start("save", "Salvando resultado no banco")
     store.replace_meeting_content(meeting_id, result)
-
-    # Gravar pending .npz para labels não resolvidos
-    if unresolved:
-        import numpy as np
-
-        pending_dir = settings.data_dir / "pending"
-        pending_dir.mkdir(parents=True, exist_ok=True)
-        pending_data = {
-            lbl: embeddings[lbl] for lbl in unresolved if lbl in embeddings
-        }
-        if pending_data:
-            np.savez(str(pending_dir / f"{meeting_id}.npz"), **pending_data)
-
-    # Regenerar .md
+    _save_pending(meeting_id, embeddings, unresolved, settings.data_dir)
     store._regen_md(meeting_id)
-
-    progress(f"Reprocessamento concluído — reunião #{meeting_id}")
+    tracker.finish(f"Reprocessamento concluído — reunião #{meeting_id}")
     return result
 
 
@@ -336,20 +404,31 @@ def reextract_meeting(
     *,
     settings: Settings,
     store: Store,
-    on_progress: ProgressCb | None = None,
+    on_progress: ProgressCallback | None = None,
 ) -> None:
-    """Re-extrai resumo e action items via LLM sobre os segments existentes.
-
-    NÃO reprocessa áudio. Preserva title existente.
-    """
-    progress = on_progress or _noop
+    """Re-extrai resumo e action items via LLM sobre os segmentos existentes."""
     existing = store.get_meeting(meeting_id)
     if existing is None:
         raise ValueError(f"Reunião #{meeting_id} não encontrada")
 
     from . import extract as extract_mod
 
-    progress("Extraindo resumo e action items (LLM)…")
+    tracker = ProgressTracker(
+        (
+            StepSpec("auth", "Validar acesso ao LLM", 1.0),
+            StepSpec("llm", "Gerar resumo e tarefas", 8.0),
+            StepSpec("save", "Salvar reunião", 1.0),
+        ),
+        on_progress,
+    )
+    tracker.start("auth", "Validando acesso ao LLM")
+    try:
+        extract_mod.validate_credentials(settings)
+    except Exception as exc:
+        raise RuntimeError(f"Erro na autenticação LLM: {exc}") from exc
+    tracker.update(1.0, "Acesso ao LLM validado")
+
+    tracker.start("llm", "Gerando resumo e tarefas com LLM", determinate=False)
     try:
         summary, action_items, _suggested_title = extract_mod.extract(
             existing.segments, existing.participants, settings
@@ -357,8 +436,7 @@ def reextract_meeting(
     except Exception as exc:
         raise RuntimeError(f"Erro na extração LLM: {exc}") from exc
 
-    progress("Salvando resultado no banco…")
+    tracker.start("save", "Salvando resultado no banco")
     store.update_meeting_extract(meeting_id, summary, action_items, None)
-
     store._regen_md(meeting_id)
-    progress(f"Re-extração concluída — reunião #{meeting_id}")
+    tracker.finish(f"Re-extração concluída — reunião #{meeting_id}")

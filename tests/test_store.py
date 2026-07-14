@@ -14,11 +14,13 @@ Contracts defended:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from meet.models import ActionItem, MeetingResult, TranscriptSegment
+from meet import media
 from meet.store import Store
 
 
@@ -386,6 +388,79 @@ def test_adopt_media_and_delete(tmp_store: Store, tmp_path: Path) -> None:
     assert tmp_store.delete_meeting(mid, data_dir=data_dir)
     assert tmp_store.get_meeting(mid) is None
     assert not (data_dir / "media" / str(mid)).exists()
+
+
+def test_import_original_uses_reflink_and_preserves_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.mkv"
+    payload = b"reflink-data" * 128
+    source.write_bytes(payload)
+    source.chmod(0o640)
+    os.utime(source, (1_700_000_000, 1_700_000_000))
+    progress: list[float] = []
+
+    def clone(dst_fd: int, request: int, src_fd: int) -> None:
+        assert request == media._FICLONE
+        os.write(dst_fd, os.pread(src_fd, len(payload), 0))
+
+    monkeypatch.setattr(media.fcntl, "ioctl", clone)
+
+    dest = media.import_original(tmp_path / "data", 7, source, progress.append)
+
+    assert dest.read_bytes() == payload
+    assert source.read_bytes() == payload
+    assert dest.stat().st_mode & 0o777 == source.stat().st_mode & 0o777
+    assert dest.stat().st_mtime_ns == source.stat().st_mtime_ns
+    assert progress == [1.0]
+
+
+def test_import_original_cleans_partial_reflink_before_copy_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.mkv"
+    payload = b"fallback-data" * 100_000
+    source.write_bytes(payload)
+    removed: list[Path] = []
+    unlink = Path.unlink
+    progress: list[float] = []
+
+    def unsupported(dst_fd: int, request: int, src_fd: int) -> None:
+        os.write(dst_fd, b"partial-clone")
+        raise OSError(95, "Operation not supported")
+
+    def track_unlink(path: Path, *, missing_ok: bool = False) -> None:
+        removed.append(path)
+        unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(media.fcntl, "ioctl", unsupported)
+    monkeypatch.setattr(Path, "unlink", track_unlink)
+
+    dest = media.import_original(tmp_path / "data", 8, source, progress.append)
+
+    assert removed == [dest]
+    assert dest.read_bytes() == payload
+    assert source.read_bytes() == payload
+    assert progress[-1] == 1.0
+
+
+def test_import_original_source_is_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir = tmp_path / "data"
+    source = data_dir / "media" / "9" / "original.mkv"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"already-managed")
+    progress: list[float] = []
+
+    def unexpected_ioctl(*args: object) -> None:
+        pytest.fail("reflink must not run when source is destination")
+
+    monkeypatch.setattr(media.fcntl, "ioctl", unexpected_ioctl)
+
+    assert media.import_original(data_dir, 9, source, progress.append) == source
+    assert source.read_bytes() == b"already-managed"
+    assert progress == [1.0]
 
 
 def test_delete_missing_returns_false(tmp_store: Store, tmp_path: Path) -> None:

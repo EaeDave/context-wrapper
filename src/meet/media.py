@@ -1,9 +1,14 @@
 """Mídia gerida pelo meet: ``~/.local/share/meet/media/{id}/``."""
 
 from __future__ import annotations
+from collections.abc import Callable
 
+import fcntl
 import shutil
 from pathlib import Path
+
+
+_FICLONE = 0x40049409
 
 
 def media_dir(data_dir: Path, meeting_id: int) -> Path:
@@ -21,6 +26,7 @@ def import_original(
     data_dir: Path,
     meeting_id: int,
     source: Path,
+    on_progress: Callable[[float], None] | None = None,
 ) -> Path:
     """Copia ``source`` para ``media/{id}/original.ext`` e retorna o destino.
 
@@ -35,7 +41,27 @@ def import_original(
     dest = original_path(data_dir, meeting_id, source.suffix or ".mkv")
 
     if source.resolve() != dest.resolve():
-        shutil.copy2(source, dest)
+        cloned = False
+        try:
+            with source.open("rb") as src, dest.open("wb") as dst:
+                fcntl.ioctl(dst.fileno(), _FICLONE, src.fileno())
+            cloned = True
+        except OSError:
+            dest.unlink(missing_ok=True)
+
+        if not cloned:
+            total = max(source.stat().st_size, 1)
+            copied = 0
+            with source.open("rb") as src, dest.open("wb") as dst:
+                while chunk := src.read(1024 * 1024):
+                    dst.write(chunk)
+                    copied += len(chunk)
+                    if on_progress is not None and copied < total:
+                        on_progress(copied / total)
+        shutil.copystat(source, dest)
+
+    if on_progress is not None:
+        on_progress(1.0)
 
     # Move previews antigos gerados ao lado do OBS (se existirem)
     for pattern in (

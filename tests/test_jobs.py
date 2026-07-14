@@ -8,13 +8,16 @@ Contratos defendidos:
 
 from __future__ import annotations
 
+from dataclasses import replace
 import sqlite3
 import time
 from pathlib import Path
 
 import pytest
 
-from meet.web.jobs import JobManager, JobStatus
+from meet.progress import ProgressStep, ProgressUpdate
+from meet.web.app import _serialize_job
+from meet.web.jobs import Job, JobManager, JobStatus
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -212,3 +215,155 @@ def test_done_jobs_carregados_na_recovery(tmp_path: Path) -> None:
     assert job.status == JobStatus.done
     assert job.meeting_id == 42
     assert job.params == {"v": 1}
+
+
+def _progress(percent: float = 37.5) -> ProgressUpdate:
+    return ProgressUpdate(
+        percent=percent,
+        step="transcribe",
+        step_label="Transcrição",
+        step_percent=50.0,
+        detail="Transcrevendo áudio",
+        elapsed_seconds=12.5,
+        steps=(
+            ProgressStep("prepare", "Preparação", "done", 2.0),
+            ProgressStep("transcribe", "Transcrição", "running", 10.5),
+            ProgressStep("save", "Salvamento", "pending"),
+        ),
+    )
+
+
+def test_progress_round_trip_e_json_publico(tmp_path: Path) -> None:
+    db = tmp_path / "meet.db"
+    mgr = JobManager(db_path=db)
+    original = Job(
+        id="progress01",
+        kind="process",
+        label="Com progresso",
+        status=JobStatus.done,
+        progress=_progress(),
+    )
+    mgr._persist(original)
+
+    loaded = JobManager(db_path=db).get(original.id)
+    assert loaded is not None
+    assert loaded.progress == original.progress
+    assert _serialize_job(loaded)["progress"] == {
+        "percent": 37.5,
+        "step": "transcribe",
+        "step_label": "Transcrição",
+        "step_percent": 50.0,
+        "detail": "Transcrevendo áudio",
+        "elapsed_seconds": 12.5,
+        "steps": [
+            {"key": "prepare", "label": "Preparação", "state": "done", "elapsed_seconds": 2.0},
+            {"key": "transcribe", "label": "Transcrição", "state": "running", "elapsed_seconds": 10.5},
+            {"key": "save", "label": "Salvamento", "state": "pending", "elapsed_seconds": None},
+        ],
+    }
+
+
+def test_migracao_legada_adiciona_progress_nulo(tmp_path: Path) -> None:
+    db = tmp_path / "meet.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("""
+        CREATE TABLE jobs (
+          id TEXT PRIMARY KEY, kind TEXT NOT NULL, label TEXT NOT NULL,
+          status TEXT NOT NULL, stage TEXT NOT NULL, error TEXT,
+          meeting_id INTEGER, result_path TEXT, created_at TEXT NOT NULL,
+          finished_at TEXT, params TEXT NOT NULL DEFAULT '{}'
+        )
+    """)
+    conn.execute(
+        "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("legacy01", "process", "Legado", "done", "Pronto", None, None,
+         None, "2024-01-01T08:00:00", "2024-01-01T08:30:00", "{}"),
+    )
+    conn.commit()
+    conn.close()
+
+    loaded = JobManager(db_path=db).get("legacy01")
+    assert loaded is not None
+    assert loaded.progress is None
+    assert _serialize_job(loaded)["progress"] is None
+    conn = sqlite3.connect(str(db))
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+    conn.close()
+    assert "progress_json" in columns
+
+
+def test_recovery_marca_etapa_atual_como_error(tmp_path: Path) -> None:
+    db = tmp_path / "meet.db"
+    mgr = JobManager(db_path=db)
+    interrupted = Job(
+        id="running01",
+        kind="process",
+        label="Interrompido",
+        status=JobStatus.running,
+        progress=_progress(),
+    )
+    mgr._persist(interrupted)
+
+    loaded = JobManager(db_path=db).get(interrupted.id)
+    assert loaded is not None
+    assert loaded.status == JobStatus.error
+    assert loaded.progress is not None
+    current = next(
+        step for step in loaded.progress.steps if step.key == loaded.progress.step
+    )
+    assert current.state == "error"
+    assert all(step.state != "running" for step in loaded.progress.steps)
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_progress_terminal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fails: bool) -> None:
+    def run(self: JobManager, job: Job) -> None:
+        job.progress = _progress(80.0)
+        if fails:
+            raise RuntimeError("quebrou")
+
+    monkeypatch.setattr(JobManager, "_run", run)
+    mgr = JobManager(db_path=tmp_path / "meet.db")
+    job = mgr.submit("process", "Terminal")
+    _wait_for_status(mgr, job.id)
+
+    assert job.progress is not None
+    if fails:
+        current = next(step for step in job.progress.steps if step.key == job.progress.step)
+        assert job.status == JobStatus.error
+        assert current.state == "error"
+        assert all(step.state != "running" for step in job.progress.steps)
+    else:
+        assert job.status == JobStatus.done
+        assert job.progress.percent == 100.0
+        assert all(step.state == "done" for step in job.progress.steps)
+
+
+def test_job_concluido_preserva_erro_nao_fatal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def run(self: JobManager, job: Job) -> None:
+        progress = _progress(100.0)
+        job.progress = replace(
+            progress,
+            step="save",
+            step_label="Salvamento",
+            step_percent=100.0,
+            detail="Mídia não importada: disco cheio",
+            steps=(
+                replace(progress.steps[0], state="done"),
+                replace(progress.steps[1], state="done"),
+                ProgressStep("import", "Importação", "error", 0.1),
+            ),
+        )
+
+    monkeypatch.setattr(JobManager, "_run", run)
+    mgr = JobManager(db_path=tmp_path / "meet.db")
+    job = mgr.submit("process", "Sucesso parcial")
+    _wait_for_status(mgr, job.id)
+
+    assert job.status == JobStatus.done
+    assert job.progress is not None
+    assert job.progress.percent == 100.0
+    assert [step.state for step in job.progress.steps] == ["done", "done", "error"]
+    assert job.progress.detail == "Mídia não importada: disco cheio"

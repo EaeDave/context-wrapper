@@ -1,12 +1,19 @@
-"""Transcrição de áudio com faster-whisper; modelo carregado e liberado por chamada."""
+"""Transcrição de áudio com faster-whisper; criação/release separados do consumo do WAV."""
 
 from __future__ import annotations
 
 import gc
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .config import Settings
 from .models import TranscriptSegment, Word
+
+if TYPE_CHECKING:
+    from faster_whisper import WhisperModel
+
+TranscribeProgress = Callable[[float, float], None]
 
 
 def _preload_cuda12_libs() -> None:
@@ -32,20 +39,20 @@ def _preload_cuda12_libs() -> None:
                 pass  # sem a lib, o fallback CPU do init cobre
 
 
-def transcribe(wav: Path, settings: Settings) -> list[TranscriptSegment]:
-    """Transcreve wav usando faster-whisper.
+def load_model(settings: Settings) -> WhisperModel:
+    """Cria WhisperModel com fallback automático CUDA→CPU/int8.
 
-    Cria e destrói o modelo dentro da chamada para liberar VRAM antes da diarização.
-    Fallback automático para CPU/int8 se a inicialização CUDA falhar.
+    O caller é responsável por chamar ``release_model`` quando terminar.
+    Permite uma única instância para transcrições sequenciais (multi-track).
     """
-    from faster_whisper import WhisperModel  # import pesado: lazy
-    _preload_cuda12_libs()
+    from faster_whisper import WhisperModel as _WhisperModel  # import pesado: lazy
     from rich.console import Console
 
+    _preload_cuda12_libs()
     console = Console(stderr=True)
 
     try:
-        model = WhisperModel(
+        return _WhisperModel(
             settings.whisper_model,
             device=settings.device,
             compute_type=settings.compute_type,
@@ -56,20 +63,50 @@ def transcribe(wav: Path, settings: Settings) -> list[TranscriptSegment]:
             f"{settings.device}/{settings.compute_type}. "
             f"Usando CPU/int8.[/yellow]"
         )
-        model = WhisperModel(
+        return _WhisperModel(
             settings.whisper_model,
             device="cpu",
             compute_type="int8",
         )
 
+
+def release_model(model: WhisperModel) -> None:
+    """Descarrega pesos do runtime e libera caches antes da diarização."""
     try:
-        segments_iter, _info = model.transcribe(
-            str(wav),
-            language=settings.language,
-            vad_filter=True,
-            word_timestamps=True,
-        )
-        result = [
+        model.model.unload_model()
+    except Exception:
+        pass
+    gc.collect()
+    try:
+        import torch  # noqa: PLC0415 — import pesado: lazy
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+
+def transcribe_wav(
+    model: WhisperModel,
+    wav: Path,
+    settings: Settings,
+    on_progress: TranscribeProgress | None = None,
+) -> list[TranscriptSegment]:
+    """Transcreve wav usando modelo existente; caller gerencia o lifecycle do modelo.
+
+    Reporta (fração, segundo alcançado) via on_progress ao consumir segmentos.
+    Parâmetros idênticos aos da chamada legada: language, vad_filter, word_timestamps.
+    """
+    segments_iter, info = model.transcribe(
+        str(wav),
+        language=settings.language,
+        vad_filter=True,
+        word_timestamps=True,
+    )
+    duration = max(float(info.duration), 0.001)
+    result: list[TranscriptSegment] = []
+    for seg in segments_iter:
+        result.append(
             TranscriptSegment(
                 start=seg.start,
                 end=seg.end,
@@ -77,16 +114,27 @@ def transcribe(wav: Path, settings: Settings) -> list[TranscriptSegment]:
                 speaker=None,
                 words=[Word(w.start, w.end, w.word) for w in (seg.words or [])] or None,
             )
-            for seg in segments_iter
-        ]
-    finally:
-        del model
-        gc.collect()
-        try:
-            import torch  # noqa: PLC0415 — import pesado: lazy
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except ImportError:
-            pass
-
+        )
+        if on_progress is not None:
+            on_progress(min(float(seg.end) / duration, 1.0), float(seg.end))
+    if on_progress is not None:
+        on_progress(1.0, duration)
     return result
+
+
+def transcribe(
+    wav: Path,
+    settings: Settings,
+    on_progress: TranscribeProgress | None = None,
+) -> list[TranscriptSegment]:
+    """Cria modelo, transcreve e libera VRAM num único call.
+
+    Atalho para single-track e reprocess; para multi-track use
+    ``load_model`` / ``transcribe_wav`` / ``release_model`` diretamente.
+    Fallback automático para CPU/int8 se a inicialização CUDA falhar.
+    """
+    model = load_model(settings)
+    try:
+        return transcribe_wav(model, wav, settings, on_progress)
+    finally:
+        release_model(model)
