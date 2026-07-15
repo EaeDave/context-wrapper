@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
-import { Bot, Cpu, ExternalLink, Key, Loader2, SlidersHorizontal } from "lucide-react"
+import { Bot, Check, Copy, Cpu, ExternalLink, Key, Loader2, SlidersHorizontal } from "lucide-react"
 
 import * as api from "@/lib/api"
 import type { SettingsInfo } from "@/lib/types"
@@ -52,7 +52,7 @@ const SOURCE_LABEL: Record<string, string> = {
 const PROVIDERS = [
   { value: "claude-code", label: "Claude Code (via claude CLI)" },
   { value: "anthropic", label: "Anthropic (API / OAuth)" },
-  { value: "openai", label: "OpenAI" },
+  { value: "openai", label: "OpenAI (API / OAuth)" },
   { value: "ollama", label: "Ollama (local)" },
 ]
 
@@ -113,7 +113,11 @@ export default function SettingsPage() {
         description: data.email ? `Conectado como ${data.email}` : undefined,
       })
       setWizardOpen(false)
+      setLlmProvider("anthropic")
+      if (settings?.llm.provider !== "anthropic") setLlmModel("")
+      setLlmCustomModel(false)
       queryClient.invalidateQueries({ queryKey: ["settings"] })
+      queryClient.invalidateQueries({ queryKey: ["llm-models", "anthropic"] })
     },
     onError: (err: Error) =>
       toast.error("Falha na conexão", { description: err.message }),
@@ -136,10 +140,77 @@ export default function SettingsPage() {
     setWizardOpen(true)
   }
 
+  // ── OpenAI device-code OAuth ───────────────────────────────────────────────
+  const [openaiWizardOpen, setOpenaiWizardOpen] = useState(false)
+  const [openaiWizardStep, setOpenaiWizardStep] = useState<1 | 2>(1)
+  const [openaiState, setOpenaiState] = useState<string | null>(null)
+  const [openaiUserCode, setOpenaiUserCode] = useState<string | null>(null)
+  const [openaiUrl, setOpenaiUrl] = useState<string | null>(null)
+  const [openaiCodeCopied, setOpenaiCodeCopied] = useState(false)
+
+  const openaiAuthorize = useMutation({
+    mutationFn: api.openaiAuthorize,
+    onSuccess: ({ url, state, user_code }) => {
+      window.open(url, "_blank", "noopener,noreferrer")
+      setOpenaiState(state)
+      setOpenaiUserCode(user_code)
+      setOpenaiUrl(url)
+      setOpenaiWizardStep(2)
+    },
+    onError: (err: Error) =>
+      toast.error("Erro ao iniciar autorização OpenAI", { description: err.message }),
+  })
+
+  const openaiExchange = useMutation({
+    mutationFn: () => api.openaiExchange(openaiState ?? ""),
+    onSuccess: (data) => {
+      toast.success("Conta OpenAI conectada", {
+        description: data.email ? `Conectado como ${data.email}` : undefined,
+      })
+      setOpenaiWizardOpen(false)
+      setLlmProvider("openai")
+      if (settings?.llm.provider !== "openai") setLlmModel("")
+      setLlmCustomModel(false)
+      queryClient.invalidateQueries({ queryKey: ["settings"] })
+      queryClient.invalidateQueries({ queryKey: ["llm-models", "openai"] })
+    },
+    onError: (err: Error) =>
+      toast.error("Falha na conexão OpenAI", { description: err.message }),
+  })
+
+  const openaiDisconnect = useMutation({
+    mutationFn: api.openaiDisconnect,
+    onSuccess: () => {
+      toast.success("Conta OpenAI desconectada")
+      queryClient.invalidateQueries({ queryKey: ["settings"] })
+      queryClient.invalidateQueries({ queryKey: ["llm-models", "openai"] })
+    },
+    onError: (err: Error) =>
+      toast.error("Erro ao desconectar", { description: err.message }),
+  })
+
+  function openOpenAIWizard() {
+    setOpenaiWizardStep(1)
+    setOpenaiState(null)
+    setOpenaiUserCode(null)
+    setOpenaiUrl(null)
+    setOpenaiCodeCopied(false)
+    setOpenaiWizardOpen(true)
+  }
+
+  function copyOpenAICode() {
+    if (openaiUserCode) {
+      navigator.clipboard.writeText(openaiUserCode)
+      setOpenaiCodeCopied(true)
+      setTimeout(() => setOpenaiCodeCopied(false), 2000)
+    }
+  }
+
   // ── LLM Provider ──────────────────────────────────────────────────────────
   const [llmProvider, setLlmProvider] = useState("")
   const [llmModel, setLlmModel] = useState("")
   const [llmInitialized, setLlmInitialized] = useState(false)
+  const [llmCustomModel, setLlmCustomModel] = useState(false)
 
   useEffect(() => {
     if (settings && !llmInitialized) {
@@ -148,6 +219,49 @@ export default function SettingsPage() {
       setLlmInitialized(true)
     }
   }, [settings, llmInitialized])
+
+  const {
+    data: modelCatalog,
+    isLoading: modelsLoading,
+    isFetching: modelsFetching,
+    isError: modelsError,
+    refetch: refetchModels,
+  } = useQuery({
+    queryKey: ["llm-models", llmProvider],
+    queryFn: () => api.getLlmModels(llmProvider),
+    enabled: Boolean(llmProvider),
+    retry: 2,
+    retryDelay: (attempt) => 500 * 2 ** attempt,
+  })
+
+  const modelIsKnown = Boolean(
+    llmModel && modelCatalog?.models.some((model) => model.id === llmModel),
+  )
+  const showingCustomModel = Boolean(
+    llmCustomModel || (llmModel && modelCatalog && !modelIsKnown),
+  )
+  const modelSelectValue = showingCustomModel
+    ? "__custom__"
+    : llmModel || "__default__"
+
+  function changeLlmProvider(provider: string) {
+    setLlmProvider(provider)
+    setLlmModel("")
+    setLlmCustomModel(false)
+  }
+
+  function changeLlmModel(value: string) {
+    if (value === "__default__") {
+      setLlmModel("")
+      setLlmCustomModel(false)
+    } else if (value === "__custom__") {
+      if (modelIsKnown) setLlmModel("")
+      setLlmCustomModel(true)
+    } else {
+      setLlmModel(value)
+      setLlmCustomModel(false)
+    }
+  }
 
   const saveLlm = useMutation({
     mutationFn: () => api.setLlm(llmProvider, llmModel),
@@ -479,6 +593,190 @@ export default function SettingsPage() {
         </DialogContent>
       </Dialog>
 
+      {/* ── ChatGPT / Codex (OpenAI) ──────────────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base font-semibold">
+            <Bot className="size-4" />
+            ChatGPT / Codex (OpenAI)
+          </CardTitle>
+          <CardDescription>
+            Autenticação via assinatura ChatGPT Plus/Pro — sem necessidade de chave de API.
+            Use o device code para conectar sua conta e autorizar o acesso.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {settings?.openai.connected ? (
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Badge className="bg-green-600 text-white hover:bg-green-700">
+                  conectado
+                </Badge>
+                {settings.openai.email && (
+                  <span className="text-sm text-muted-foreground">
+                    {settings.openai.email}
+                  </span>
+                )}
+                {settings.openai.plan && (
+                  <Badge variant="outline" className="text-xs">
+                    {settings.openai.plan}
+                  </Badge>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={openOpenAIWizard}>
+                  Reconectar
+                </Button>
+                <AlertDialog>
+                  <AlertDialogTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={openaiDisconnect.isPending}
+                    >
+                      Desconectar
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Desconectar conta OpenAI?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        Os tokens OAuth serão removidos. Você precisará reconectar
+                        para continuar usando o ChatGPT/Codex via assinatura.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancelar</AlertDialogCancel>
+                      <AlertDialogAction
+                        onClick={() => openaiDisconnect.mutate()}
+                        className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                      >
+                        Desconectar
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+              </div>
+            </div>
+          ) : (
+            <Button onClick={openOpenAIWizard}>
+              Conectar com ChatGPT/Codex
+            </Button>
+          )}
+
+          <div className="flex items-center justify-between gap-4">
+            {settings?.openai.api_key_configured ? (
+              <p className="text-xs text-muted-foreground">
+                Chave de API configurada — usada como fallback quando OAuth não está ativo.
+              </p>
+            ) : <span />}
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={testMutation.isPending}
+              onClick={() => testMutation.mutate("openai")}
+            >
+              {testMutation.isPending && testMutation.variables === "openai" ? (
+                <><Loader2 className="size-3.5 mr-1.5 animate-spin" />Testando…</>
+              ) : "Testar"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* OpenAI device-code wizard dialog */}
+      <Dialog open={openaiWizardOpen} onOpenChange={setOpenaiWizardOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Conectar com ChatGPT/Codex</DialogTitle>
+            <DialogDescription>
+              {openaiWizardStep === 1
+                ? "Passo 1 de 2 — Inicie a autenticação para receber seu código de acesso."
+                : "Passo 2 de 2 — Digite o código no site da OpenAI e confirme aqui."}
+            </DialogDescription>
+          </DialogHeader>
+
+          {openaiWizardStep === 1 ? (
+            <div className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Ao clicar no botão abaixo, uma página da OpenAI será aberta em nova aba
+                e um <strong>código de acesso</strong> será gerado. Você digitará esse
+                código no site para autorizar o acesso à sua conta.
+              </p>
+              <DialogFooter>
+                <Button
+                  onClick={() => openaiAuthorize.mutate()}
+                  disabled={openaiAuthorize.isPending}
+                >
+                  {openaiAuthorize.isPending ? (
+                    <><Loader2 className="size-3.5 mr-1.5 animate-spin" />Iniciando…</>
+                  ) : "Iniciar"}
+                </Button>
+              </DialogFooter>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <p className="text-sm text-muted-foreground">
+                  Digite o código abaixo em{" "}
+                  <a
+                    href={openaiUrl ?? "https://auth.openai.com/codex/device"}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-foreground underline underline-offset-2"
+                  >
+                    auth.openai.com/codex/device
+                    <ExternalLink className="size-3" />
+                  </a>
+                  {" "}e volte aqui para concluir.
+                </p>
+                <div className="flex items-center gap-3 rounded-lg border bg-muted/40 px-4 py-3">
+                  <code className="flex-1 text-center text-2xl font-mono font-bold tracking-[0.25em] select-all">
+                    {openaiUserCode}
+                  </code>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="shrink-0"
+                    onClick={copyOpenAICode}
+                    aria-label="Copiar código"
+                  >
+                    {openaiCodeCopied ? (
+                      <Check className="size-4 text-green-600" />
+                    ) : (
+                      <Copy className="size-4" />
+                    )}
+                  </Button>
+                </div>
+              </div>
+              <ol className="list-decimal list-inside space-y-1 text-sm text-muted-foreground">
+                <li>Abra o link acima (ou a aba que abrimos automaticamente)</li>
+                <li>Digite o código quando solicitado</li>
+                <li>Autorize o acesso na página da OpenAI</li>
+                <li>Clique em <strong>Concluir conexão</strong> abaixo</li>
+              </ol>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => setOpenaiWizardStep(1)}
+                  disabled={openaiExchange.isPending}
+                >
+                  Voltar
+                </Button>
+                <Button
+                  onClick={() => openaiExchange.mutate()}
+                  disabled={openaiExchange.isPending}
+                >
+                  {openaiExchange.isPending ? (
+                    <><Loader2 className="size-3.5 mr-1.5 animate-spin" />Aguardando…</>
+                  ) : "Concluir conexão"}
+                </Button>
+              </DialogFooter>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
       {/* ── LLM Provider ──────────────────────────────────────────────── */}
       <Card>
         <CardHeader>
@@ -493,9 +791,9 @@ export default function SettingsPage() {
         <CardContent className="space-y-4">
           <div className="grid gap-3">
             <div className="space-y-1.5">
-              <Label>Provider</Label>
-              <Select value={llmProvider} onValueChange={setLlmProvider}>
-                <SelectTrigger>
+              <Label htmlFor="llm-provider">Provider</Label>
+              <Select value={llmProvider} onValueChange={changeLlmProvider}>
+                <SelectTrigger id="llm-provider">
                   <SelectValue placeholder="Selecionar provider" />
                 </SelectTrigger>
                 <SelectContent>
@@ -508,16 +806,69 @@ export default function SettingsPage() {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label>Modelo</Label>
-              <Input
-                placeholder={
-                  llmProvider
-                    ? `padrão do ${llmProvider}`
-                    : "padrão do provider"
-                }
-                value={llmModel}
-                onChange={(e) => setLlmModel(e.target.value)}
-              />
+              <div className="flex items-center justify-between gap-2">
+                <Label htmlFor="llm-model">Modelo</Label>
+                {modelCatalog && (
+                  <Badge variant="outline" className="font-normal text-muted-foreground">
+                    {modelCatalog.source === "provider" ? "Catálogo da conta" : "Modelos de referência"}
+                  </Badge>
+                )}
+              </div>
+              <Select
+                value={modelSelectValue}
+                onValueChange={changeLlmModel}
+                disabled={!llmProvider || modelsLoading}
+              >
+                <SelectTrigger id="llm-model">
+                  <SelectValue placeholder={modelsLoading ? "Carregando modelos…" : "Selecionar modelo"} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__default__">
+                    Automático{modelCatalog?.default_model ? ` — ${modelCatalog.default_model}` : ""}
+                  </SelectItem>
+                  {modelCatalog?.models.map((model) => (
+                    <SelectItem key={model.id} value={model.id}>
+                      {model.name}{model.recommended ? " · Recomendado" : ""} — {model.id}
+                    </SelectItem>
+                  ))}
+                  {(modelCatalog?.allows_custom ?? true) && (
+                    <SelectItem value="__custom__">Outro modelo…</SelectItem>
+                  )}
+                </SelectContent>
+              </Select>
+              {showingCustomModel && (
+                <Input
+                  aria-label="ID personalizado do modelo"
+                  placeholder="Digite o ID exato do modelo"
+                  value={llmModel}
+                  onChange={(event) => setLlmModel(event.target.value)}
+                  autoFocus
+                />
+              )}
+              {modelsError && (
+                <div className="flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2">
+                  <p className="text-xs text-destructive">
+                    Não foi possível carregar os modelos. O servidor pode precisar ser reiniciado.
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={modelsFetching}
+                    onClick={() => refetchModels()}
+                  >
+                    {modelsFetching ? "Carregando…" : "Recarregar"}
+                  </Button>
+                </div>
+              )}
+              {modelCatalog?.warning && (
+                <p className="text-xs text-amber-600 dark:text-amber-400">
+                  {modelCatalog.warning}
+                </p>
+              )}
+              <p className="text-xs text-muted-foreground">
+                Automático acompanha o modelo recomendado pelo provider. O ID exato é salvo sem alteração.
+              </p>
             </div>
           </div>
           <div className="flex items-center gap-2">

@@ -46,12 +46,25 @@ gravação (OBS) ──> wav 16k ──> transcrição + diarização ──> LL
   reunião curta mantém a análise em uma única chamada. **Jobs internos:**
   `process`, `reprocess`, `reextract`; **integração externa:** LLM configurada.
 - Quando o LLM está habilitado, suas credenciais são validadas antes das etapas
-  caras. Sessão Claude expirada/revogada encerra o job imediatamente e orienta
-  reconexão em Configurações, evitando perder minutos transcrevendo antes da
-  falha. **Integração externa:** Anthropic OAuth; **job interno:** `process`.
+  caras. Sessão Claude ou OpenAI expirada/revogada encerra o job imediatamente e
+  orienta reconexão em Configurações, evitando transcrever antes da falha.
+  **Integrações externas:** Anthropic OAuth e OpenAI OAuth; **job interno:**
+  `process`.
 - A autenticação Claude Pro/Max renova tokens automaticamente. Cada renovação
   persiste o novo refresh token rotacionado; token já revogado exige uma nova
   autenticação manual. **Endpoints internos:** `/api/auth/anthropic/*`.
+- ChatGPT Plus/Pro também pode ser conectado por device code, usando a assinatura
+  no backend Codex sem API key; tokens são renovados e persistidos localmente.
+  Com modelo vazio, o app escolhe o primeiro modelo visível e suportado no
+  catálogo da conta; um modelo explícito continua prevalecendo. **Endpoints
+  internos:** `/api/auth/openai/*`.
+- Em Configurações, o modelo é escolhido visualmente por provider. Anthropic e
+  Claude Code usam um catálogo de referência; OpenAI e Ollama atualizam a lista
+  com os modelos disponíveis na conta ou instalação. “Automático” preserva o
+  default do provider, e “Outro modelo” aceita um ID canônico explícito sem
+  reescrevê-lo. Falha de descoberta não bloqueia a configuração: a interface
+  mantém referências locais e mostra o aviso. **Endpoint interno:**
+  `GET /api/settings/models?provider=...`.
 - Jobs são executados em fila, um por vez, porque Whisper e pyannote compartilham
   GPU. O estado é persistido; jobs interrompidos por reinício do servidor viram
   erro em vez de serem retomados silenciosamente. **Endpoints internos:**
@@ -79,7 +92,7 @@ gravação (OBS) ──> wav 16k ──> transcrição + diarização ──> LL
 
 - Linux com GPU NVIDIA (testado: RTX 3060 12GB), `ffmpeg` no PATH
 - [uv](https://docs.astral.sh/uv/)
-- Token Hugging Face (diarização); Claude Code instalado OU uma API key de LLM (extração)
+- Token Hugging Face (diarização); assinatura Claude/ChatGPT, API key de LLM ou Ollama (extração)
 
 ## Setup
 
@@ -102,11 +115,15 @@ Divide o rate limit com seu uso normal do Claude Code.
 Alternativas via `~/.config/meet/config.toml`:
 
 ```toml
-llm_provider = "anthropic"  # API oficial ($; exige ANTHROPIC_API_KEY)
-# llm_provider = "openai"   # exige OPENAI_API_KEY
+llm_provider = "anthropic"  # API key ou assinatura Claude Pro/Max via Configurações
+# llm_provider = "openai"   # API key ou assinatura ChatGPT Plus/Pro via Configurações
 # llm_provider = "ollama"   # 100% local, ex.: llm_model = "qwen3:14b"
-llm_model = ""              # vazio = default do provider
+llm_model = ""              # vazio = modelo padrão/disponível do provider
 ```
+
+Os mesmos valores podem ser escolhidos visualmente em **Configurações → Provider
+LLM**. Modelo “Automático” acompanha o catálogo do provider; IDs customizados
+continuam aceitos para modelos novos ou locais.
 
 ### 3. OBS multi-track (recomendado)
 

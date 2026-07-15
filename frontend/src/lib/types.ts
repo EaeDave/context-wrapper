@@ -166,6 +166,7 @@ export interface ProcessRequest {
 export interface SettingsInfo {
   hf_token: { configured: boolean; masked: string | null; source: "local" | "config" | "env" | null }
   anthropic: { connected: boolean; email: string | null; expires: number | null; api_key_configured: boolean }
+  openai: { connected: boolean; email: string | null; expires: number | null; plan: string | null; api_key_configured: boolean }
   llm: { provider: string; model: string }
   tuning: {
     whisper_model: string
@@ -176,7 +177,24 @@ export interface SettingsInfo {
   }
 }
 
+export interface LlmModelOption {
+  id: string
+  name: string
+  recommended: boolean
+}
+
+export interface LlmModelCatalog {
+  provider: string
+  default_model: string
+  models: LlmModelOption[]
+  source: "bundled" | "provider"
+  stale: boolean
+  warning: string | null
+  allows_custom: boolean
+}
+
 export interface AuthorizeResult { url: string; state: string }
+export interface OpenAIAuthorizeResult { url: string; state: string; user_code: string }
 
 export interface Task {
   id: number

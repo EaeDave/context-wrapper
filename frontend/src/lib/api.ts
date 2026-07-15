@@ -8,7 +8,9 @@ import type {
   ProcessRequest,
   ProbeResult,
   SettingsInfo,
+  LlmModelCatalog,
   AuthorizeResult,
+  OpenAIAuthorizeResult,
   ActionItem,
   Task,
   VoiceUsage,
@@ -119,6 +121,9 @@ export const deleteSpeaker = (name: string): Promise<void> =>
 export const getSettings = (): Promise<SettingsInfo> =>
   request("GET", "/api/settings")
 
+export const getLlmModels = (provider: string): Promise<LlmModelCatalog> =>
+  request("GET", `/api/settings/models?provider=${encodeURIComponent(provider)}`)
+
 export const setHfToken = (token: string): Promise<{ ok: true }> =>
   request("PUT", "/api/settings/hf-token", { token })
 
@@ -139,6 +144,17 @@ export const anthropicExchange = (
 
 export const anthropicDisconnect = (): Promise<{ ok: true }> =>
   request("DELETE", "/api/auth/anthropic")
+
+export const openaiAuthorize = (): Promise<OpenAIAuthorizeResult> =>
+  request("POST", "/api/auth/openai/authorize")
+
+export const openaiExchange = (
+  state: string,
+): Promise<{ ok: true; email: string | null }> =>
+  request("POST", "/api/auth/openai/exchange", { state })
+
+export const openaiDisconnect = (): Promise<{ ok: true }> =>
+  request("DELETE", "/api/auth/openai")
 
 export const updateActionItem = (
   id: number,

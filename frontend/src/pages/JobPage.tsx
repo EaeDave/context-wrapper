@@ -199,10 +199,14 @@ export default function JobPage() {
   }
 
   const isActive = job.status === "queued" || job.status === "running"
+  const needsOpenAIReconnect =
+    job.status === "error" && job.error?.includes("Sessão OpenAI")
   const needsAnthropicReconnect =
     job.status === "error" &&
     (job.error?.includes("invalid_grant") ||
-      job.error?.includes("Reconecte sua conta"))
+      job.error?.includes("Sessão Claude"))
+  const needsLlmReconnect = needsAnthropicReconnect || needsOpenAIReconnect
+  const reconnectProvider = needsOpenAIReconnect ? "OpenAI" : "Claude"
   // Jobs terminados com sucesso sempre exibem 100% — nunca inventar número
   // além do que o backend já garante para status "done".
   const displayPercent = job.progress
@@ -342,15 +346,15 @@ export default function JobPage() {
                   {job.error}
                 </pre>
               )}
-              {needsAnthropicReconnect && (
+              {needsLlmReconnect && (
                 <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
-                  Sua sessão Claude expirou. Reconecte a conta antes de tentar
-                  processar a reunião novamente.
+                  Sua sessão {reconnectProvider} expirou. Reconecte a conta antes de
+                  tentar processar a reunião novamente.
                 </div>
               )}
-              {needsAnthropicReconnect && (
+              {needsLlmReconnect && (
                 <Button asChild>
-                  <Link to="/settings">Reconectar Claude</Link>
+                  <Link to="/settings">Reconectar {reconnectProvider}</Link>
                 </Button>
               )}
               <Button variant="outline" size="sm" asChild>

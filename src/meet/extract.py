@@ -198,6 +198,137 @@ class OpenAIProvider(LLMProvider):
         return resp.choices[0].message.content or ""
 
 
+
+from .model_catalog import (
+    CODEX_BACKEND as _CODEX_BACKEND,
+    CODEX_CLIENT_VERSION as _CODEX_CLIENT_VERSION,
+    CODEX_FALLBACK_MODEL as _CODEX_FALLBACK_MODEL,
+    fetch_codex_models,
+)
+
+
+class OpenAIOAuthProvider(LLMProvider):
+    """Usa assinatura ChatGPT/Codex via OAuth no backend Responses."""
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+        self._model = settings.llm_model
+        self._resolved_model: str | None = None
+
+    def _resolve_model(self, access: str, tokens: dict) -> str:
+        """Seleciona primeiro modelo visível da conta quando não há override."""
+        if self._model:
+            return self._model
+        if self._resolved_model:
+            return self._resolved_model
+
+        try:
+            candidates = fetch_codex_models(access, tokens)
+            if candidates:
+                self._resolved_model = str(candidates[0]["id"])
+        except Exception:
+            # Catálogo remoto é otimização; indisponibilidade não bloqueia análise.
+            pass
+
+        self._resolved_model = self._resolved_model or _CODEX_FALLBACK_MODEL
+        return self._resolved_model
+
+    def complete(self, system: str, user: str) -> str:
+        import json
+
+        import httpx
+
+        from .openai_oauth import get_access_token, load_tokens
+
+        access = get_access_token(self._settings)
+        tokens = load_tokens(self._settings) or {}
+        model = self._resolve_model(access, tokens)
+        headers = {
+            "Authorization": f"Bearer {access}",
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json",
+            "originator": "context-wrapper",
+            "User-Agent": "context-wrapper/0.1.0",
+            "version": _CODEX_CLIENT_VERSION,
+        }
+        if tokens.get("account_id"):
+            headers["ChatGPT-Account-ID"] = tokens["account_id"]
+
+        payload = {
+            "model": model,
+            "instructions": system,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": user}],
+                }
+            ],
+            "tools": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "reasoning": {"effort": "medium", "summary": "auto"},
+            "store": False,
+            "stream": True,
+            "include": [],
+        }
+
+        def request(current_access: str) -> tuple[str, bool]:
+            headers["Authorization"] = f"Bearer {current_access}"
+            parts: list[str] = []
+            with httpx.Client(timeout=300) as client:
+                with client.stream(
+                    "POST",
+                    f"{_CODEX_BACKEND}/responses",
+                    json=payload,
+                    headers=headers,
+                ) as resp:
+                    if resp.status_code == 401:
+                        return "", True
+                    if not resp.is_success:
+                        body = resp.read().decode(errors="replace")
+                        raise RuntimeError(
+                            f"OpenAI Codex respondeu HTTP {resp.status_code}: {body[:500]}"
+                        )
+                    for line in resp.iter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        raw = line[5:].strip()
+                        if not raw or raw == "[DONE]":
+                            continue
+                        try:
+                            event = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        kind = event.get("type")
+                        if kind == "response.output_text.delta":
+                            parts.append(event.get("delta") or "")
+                        elif kind == "response.failed":
+                            error = (event.get("response") or {}).get("error") or {}
+                            detail = error.get("message") or error.get("code") or "falha desconhecida"
+                            raise RuntimeError(f"Resposta OpenAI falhou: {detail}")
+                        elif kind == "error":
+                            error = event.get("error") or event
+                            detail = error.get("message") or error.get("code") or "falha desconhecida"
+                            raise RuntimeError(f"Stream OpenAI falhou: {detail}")
+            return "".join(parts), False
+
+        result, unauthorized = request(access)
+        if unauthorized:
+            # Token pode ter sido revogado/rotacionado por outro cliente.
+            # Forçar refresh uma vez; demais erros nunca são repetidos.
+            access = get_access_token(self._settings, rejected_access=access)
+            result, unauthorized = request(access)
+        if unauthorized:
+            raise ValueError(
+                "Sessão OpenAI expirada ou revogada. "
+                "Reconecte sua conta na página Configurações."
+            )
+        if not result:
+            raise RuntimeError("Resposta OpenAI concluída sem texto.")
+        return result
+
+
 class OllamaProvider(LLMProvider):
     def __init__(self, url: str, model: str) -> None:
         self._url = url.rstrip("/")
@@ -323,13 +454,17 @@ def get_provider(settings: Settings) -> LLMProvider:
         )
 
     if provider == "openai":
-        if not settings.openai_api_key:
-            raise ValueError(
-                "openai_api_key não configurado. "
-                "Defina a variável de ambiente OPENAI_API_KEY "
-                "ou adicione ao ~/.config/meet/config.toml."
-            )
-        return OpenAIProvider(settings.openai_api_key, model)
+        from .openai_oauth import load_tokens
+
+        if load_tokens(settings):
+            return OpenAIOAuthProvider(settings)
+        if settings.openai_api_key:
+            return OpenAIProvider(settings.openai_api_key, model)
+        raise ValueError(
+            "Provider 'openai' sem credenciais. "
+            "Acesse a página Configurações para conectar com ChatGPT/Codex "
+            "ou configure OPENAI_API_KEY."
+        )
 
     if provider == "ollama":
         return OllamaProvider(settings.ollama_url, model)
@@ -346,6 +481,10 @@ def validate_credentials(settings: Settings) -> None:
     provider = get_provider(settings)
     if isinstance(provider, AnthropicOAuthProvider):
         from .anthropic_oauth import get_access_token
+
+        get_access_token(settings)
+    elif isinstance(provider, OpenAIOAuthProvider):
+        from .openai_oauth import get_access_token
 
         get_access_token(settings)
 

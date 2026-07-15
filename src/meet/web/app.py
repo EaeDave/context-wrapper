@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from ..config import hf_token_source, load_settings, save_local_settings
 from ..progress import ProgressUpdate
+from ..model_catalog import get_model_catalog
 from ..store import Store
 from ..anthropic_oauth import (
     build_authorize_url,
@@ -26,6 +27,7 @@ from ..anthropic_oauth import (
     load_tokens,
     save_tokens,
 )
+from .. import openai_oauth as _oai
 from .jobs import Job, JobStatus, manager
 
 WEB_DIR = Path(__file__).resolve().parent
@@ -178,6 +180,11 @@ class ExchangeBody(BaseModel):
     state: str
 
 
+
+class OpenAIExchangeBody(BaseModel):
+    state: str
+
+
 class PatchActionItemBody(BaseModel):
     what: str | None = None
     where: str | None = None
@@ -250,6 +257,9 @@ class ContextExportBody(BaseModel):
 _pending_verifiers: dict[str, str] = {}
 _MAX_PENDING = 5
 _VALID_LLM_PROVIDERS = frozenset({"claude-code", "anthropic", "openai", "ollama"})
+# Device-code flows OpenAI pendentes: {state → {device_auth_id, user_code, interval}}
+_pending_openai: dict[str, dict] = {}
+_MAX_PENDING_OPENAI = 5
 
 # ── App ──────────────────────────────────────────────────────────────────────
 
@@ -1014,6 +1024,7 @@ def create_app() -> FastAPI:
         """Retorna estado atual de configurações (sem segredos inteiros)."""
         settings = load_settings()
         tokens = load_tokens(settings)
+        oai_tokens = _oai.load_tokens(settings)
         hf = settings.hf_token
         masked = (hf[:3] + "…" + hf[-4:]) if hf else None
         source = hf_token_source(settings) if hf else None
@@ -1028,6 +1039,13 @@ def create_app() -> FastAPI:
                 "email": tokens.get("email") if tokens else None,
                 "expires": tokens.get("expires") if tokens else None,
                 "api_key_configured": bool(settings.anthropic_api_key),
+            },
+            "openai": {
+                "connected": bool(oai_tokens),
+                "email": oai_tokens.get("email") if oai_tokens else None,
+                "expires": oai_tokens.get("expires") if oai_tokens else None,
+                "plan": oai_tokens.get("plan") if oai_tokens else None,
+                "api_key_configured": bool(settings.openai_api_key),
             },
             "llm": {
                 "provider": settings.llm_provider,
@@ -1064,6 +1082,15 @@ def create_app() -> FastAPI:
             raise HTTPException(409, detail)
         save_local_settings({"hf_token": None}, settings)
         return {"ok": True}
+
+    @app.get("/api/settings/models")
+    def api_get_llm_models(provider: str = Query(...)) -> dict:
+        """Lista modelos selecionáveis, com descoberta específica por provider."""
+        settings = load_settings()
+        try:
+            return get_model_catalog(settings, provider)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.put("/api/settings/llm")
     def api_put_llm(body: LLMSettingsBody) -> dict:
@@ -1139,9 +1166,21 @@ def create_app() -> FastAPI:
                 return {"ok": False, "detail": f"Erro de conexão: {exc}"}
 
         if target == "openai":
+            # OAuth tem prioridade; API key é fallback.
+            oai_tokens = _oai.load_tokens(settings)
+            oauth_error: Exception | None = None
+            if oai_tokens:
+                try:
+                    _oai.get_access_token(settings)
+                    email = oai_tokens.get("email")
+                    detail = f"Conectado via OAuth ({email})" if email else "Conectado via OAuth"
+                    return {"ok": True, "detail": detail}
+                except Exception as exc:
+                    oauth_error = exc
             api_key = settings.openai_api_key
             if not api_key:
-                return {"ok": False, "detail": "OpenAI API key não configurada"}
+                detail = str(oauth_error) if oauth_error else "OpenAI não configurado (OAuth nem API key)"
+                return {"ok": False, "detail": detail}
             try:
                 resp = httpx.get(
                     "https://api.openai.com/v1/models",
@@ -1149,7 +1188,7 @@ def create_app() -> FastAPI:
                     timeout=10.0,
                 )
                 if resp.status_code == 200:
-                    return {"ok": True, "detail": "Conectado"}
+                    return {"ok": True, "detail": "Conectado via API key"}
                 return {"ok": False, "detail": f"Chave inválida (HTTP {resp.status_code})"}
             except Exception as exc:
                 return {"ok": False, "detail": f"Erro de conexão: {exc}"}
@@ -1218,6 +1257,71 @@ def create_app() -> FastAPI:
         """Remove tokens OAuth Anthropic."""
         settings = load_settings()
         clear_tokens(settings)
+        return {"ok": True}
+
+    @app.post("/api/auth/openai/authorize")
+    def api_openai_authorize() -> dict:
+        """Inicia device-code flow OpenAI. Retorna url/state/user_code."""
+        import os as _os
+
+        try:
+            data = _oai.request_device_code()
+        except Exception as exc:
+            raise HTTPException(503, f"Falha ao iniciar autenticação OpenAI: {exc}") from exc
+
+        state = _os.urandom(16).hex()
+        if len(_pending_openai) >= _MAX_PENDING_OPENAI:
+            oldest = next(iter(_pending_openai))
+            del _pending_openai[oldest]
+        _pending_openai[state] = {
+            "device_auth_id": data["device_auth_id"],
+            "user_code": data["user_code"],
+            "interval": data.get("interval", 5),
+        }
+        url = data.get("verification_uri_complete") or _oai._DEVICE_PAGE
+        return {"url": url, "state": state, "user_code": data["user_code"]}
+
+    @app.post("/api/auth/openai/exchange")
+    def api_openai_exchange(body: OpenAIExchangeBody) -> dict:
+        """Faz polling e troca de tokens OpenAI por state; persiste e ativa provider."""
+        state = body.state.strip()
+        pending = _pending_openai.pop(state, None)
+        if pending is None:
+            raise HTTPException(400, "State inválido ou expirado")
+        try:
+            poll_result = _oai.poll_device_token(
+                pending["device_auth_id"],
+                pending["user_code"],
+                interval=pending.get("interval", 5),
+                timeout=30,
+            )
+            token_data = _oai.exchange_device_code(
+                poll_result["authorization_code"],
+                poll_result["code_verifier"],
+            )
+            tokens = _oai.build_stored_tokens(token_data)
+        except TimeoutError as exc:
+            _pending_openai[state] = pending
+            raise HTTPException(
+                408,
+                "Autorização ainda pendente. Autorize na OpenAI e tente concluir novamente.",
+            ) from exc
+        except Exception as exc:
+            _pending_openai[state] = pending
+            raise HTTPException(400, f"Autenticação OpenAI falhou: {exc}") from exc
+        settings = load_settings()
+        _oai.save_tokens(settings, tokens)
+        llm_patch = {"llm_provider": "openai"}
+        if settings.llm_provider != "openai":
+            llm_patch["llm_model"] = ""
+        save_local_settings(llm_patch, settings)
+        return {"ok": True, "email": tokens.get("email")}
+
+    @app.delete("/api/auth/openai")
+    def api_openai_logout() -> dict:
+        """Remove tokens OAuth OpenAI."""
+        settings = load_settings()
+        _oai.clear_tokens(settings)
         return {"ok": True}
 
     # ── SPA (REGISTRAR POR ÚLTIMO) ────────────────────────────────────────────

@@ -490,11 +490,123 @@ def test_get_provider_anthropic_no_credentials_raises(tmp_path) -> None:
         get_provider(s)
 
 
-def test_get_provider_openai_missing_key_raises() -> None:
-    """Missing openai_api_key raises ValueError mentioning the key name."""
+def test_get_provider_openai_missing_credentials_raises() -> None:
+    """Sem OAuth nem API key, aponta para Configurações e variável de ambiente."""
     s = Settings(llm_provider="openai", openai_api_key="")
-    with pytest.raises(ValueError, match="openai_api_key"):
+    with pytest.raises(ValueError, match="Configurações|OPENAI_API_KEY"):
         get_provider(s)
+
+
+def test_get_provider_openai_oauth_precede_api_key(tmp_path) -> None:
+    """OAuth da assinatura tem precedência; API key permanece fallback."""
+    from meet.openai_oauth import save_tokens
+
+    settings = Settings(
+        llm_provider="openai",
+        openai_api_key="sk-api-fallback",
+        data_dir=tmp_path,
+    )
+    save_tokens(
+        settings,
+        {
+            "access": "oauth-access",
+            "refresh": "oauth-refresh",
+            "expires": 9_999_999_999_000,
+            "account_id": "account-123",
+        },
+    )
+
+    provider = get_provider(settings)
+
+    assert isinstance(provider, extract_mod.OpenAIOAuthProvider)
+
+
+def test_openai_oauth_provider_consome_stream_responses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Provider envia wire format Codex e concatena deltas de texto SSE."""
+    import httpx
+
+    captured: dict = {}
+
+    catalog_calls: list[dict] = []
+
+    class FakeCatalogResponse:
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict:
+            return {"models": [
+                {"slug": "internal", "priority": 0, "visibility": "hide"},
+                {"slug": "unsupported", "priority": 1, "visibility": "list", "supported_in_api": False},
+                {"slug": "gpt-5.6-luna", "priority": 3, "visibility": "list", "supported_in_api": True},
+                {"slug": "gpt-5.6-terra", "priority": 2, "visibility": "list", "supported_in_api": True},
+            ]}
+
+    def fake_get(url: str, **kwargs) -> FakeCatalogResponse:
+        catalog_calls.append({"url": url, **kwargs})
+        return FakeCatalogResponse()
+
+    class FakeResponse:
+        status_code = 200
+        is_success = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def iter_lines():
+            return iter([
+                'data: {"type":"response.output_text.delta","delta":"{\\"title\\":"}',
+                'data: {"type":"response.output_text.delta","delta":"\\"Reunião\\"}"}',
+                'data: {"type":"response.completed","response":{"id":"resp-1"}}',
+                "data: [DONE]",
+            ])
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def stream(method, url, **kwargs):
+            captured.update(method=method, url=url, **kwargs)
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr("meet.openai_oauth.get_access_token", lambda _settings, **_kwargs: "oauth-access")
+    monkeypatch.setattr(
+        "meet.openai_oauth.load_tokens",
+        lambda _settings: {"account_id": "account-123"},
+    )
+    provider = extract_mod.OpenAIOAuthProvider(
+        Settings(llm_provider="openai", data_dir=tmp_path)
+    )
+
+    result = provider.complete("system prompt", "transcrição")
+
+    assert result == '{"title":"Reunião"}'
+    assert captured["url"] == "https://chatgpt.com/backend-api/codex/responses"
+    assert captured["headers"]["ChatGPT-Account-ID"] == "account-123"
+    assert captured["json"]["model"] == "gpt-5.6-terra"
+    assert captured["headers"]["version"] == extract_mod._CODEX_CLIENT_VERSION
+    assert catalog_calls[0]["params"] == {
+        "client_version": extract_mod._CODEX_CLIENT_VERSION
+    }
+    assert captured["json"]["instructions"] == "system prompt"
+    assert captured["json"]["input"][0]["content"][0]["text"] == "transcrição"
+    assert captured["json"]["stream"] is True
 
 
 def test_get_provider_unknown_provider_raises() -> None:
