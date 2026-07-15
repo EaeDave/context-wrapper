@@ -14,6 +14,8 @@ import {
   Square,
   BrainCircuit,
   AlertTriangle,
+  CheckCircle2,
+  Circle,
 } from "lucide-react"
 import type { Task, Project, ContextExportRequest } from "@/lib/types"
 import * as api from "@/lib/api"
@@ -332,27 +334,32 @@ function TaskItem({
   const isDone = task.status === "feito"
 
   return (
-    <li className="flex items-start gap-3 px-4 py-3">
-      {/* Selection checkbox */}
-      <div className="mt-0.5 shrink-0">
-        <Checkbox
-          checked={selected}
-          onCheckedChange={(c) => onSelect(task.id, !!c)}
-          aria-label={`Selecionar: ${task.what}`}
-          className="data-[state=checked]:border-primary data-[state=checked]:bg-primary/10"
-        />
-      </div>
-
-      {/* Completion checkbox */}
-      <div className="mt-0.5 shrink-0">
-        <Checkbox
-          checked={isDone}
-          onCheckedChange={(c) =>
-            onToggle(task.id, c ? "feito" : "aberto")
-          }
-          aria-label={isDone ? "Marcar como aberta" : "Marcar como concluída"}
-        />
-      </div>
+    <li
+      className={cn(
+        "flex items-start gap-3 border-l-2 border-l-transparent px-4 py-3 transition-colors",
+        selected
+          ? "border-l-primary bg-primary/10 outline outline-1 -outline-offset-1 outline-primary/40"
+          : "hover:bg-muted/30",
+      )}
+    >
+      {/* Context selection — separate from task status */}
+      <button
+        type="button"
+        aria-pressed={selected}
+        aria-label={`${selected ? "Remover do" : "Adicionar ao"} contexto: ${task.what}`}
+        onClick={() => onSelect(task.id, !selected)}
+        className={cn(
+          "mt-0.5 inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+          selected
+            ? "border-primary bg-primary text-primary-foreground shadow-sm"
+            : "border-foreground/30 bg-muted/40 text-foreground/80 shadow-sm hover:border-primary/70 hover:bg-primary/10 hover:text-foreground",
+        )}
+      >
+        {selected ? <SquareCheck className="size-4" /> : <Square className="size-4" />}
+        <span className="hidden sm:inline">
+          {selected ? "No contexto" : "Para contexto"}
+        </span>
+      </button>
 
       {/* Content */}
       <div className="min-w-0 flex-1 space-y-1">
@@ -434,17 +441,34 @@ function TaskItem({
         </div>
       </div>
 
-      {/* Priority badge */}
-      <Badge
-        variant={PRIORITY_VARIANT[task.priority]}
-        className={cn(
-          "shrink-0 self-start text-[10px]",
-          task.priority === "media" &&
-            "border-amber-500 text-amber-600 dark:border-amber-400 dark:text-amber-400",
-        )}
-      >
-        {task.priority}
-      </Badge>
+      {/* Priority and completion — status is intentionally distinct from selection */}
+      <div className="flex shrink-0 flex-col items-end gap-2">
+        <Badge
+          variant={PRIORITY_VARIANT[task.priority]}
+          className={cn(
+            "text-[10px]",
+            task.priority === "media" &&
+              "border-amber-500 text-amber-600 dark:border-amber-400 dark:text-amber-400",
+          )}
+        >
+          {task.priority}
+        </Badge>
+        <button
+          type="button"
+          aria-pressed={isDone}
+          aria-label={isDone ? `Reabrir tarefa: ${task.what}` : `Concluir tarefa: ${task.what}`}
+          onClick={() => onToggle(task.id, isDone ? "aberto" : "feito")}
+          className={cn(
+            "inline-flex h-8 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+            isDone
+              ? "border-sky-400/60 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25"
+              : "border-input bg-background text-muted-foreground hover:border-sky-400/60 hover:text-sky-300",
+          )}
+        >
+          {isDone ? <CheckCircle2 className="size-4" /> : <Circle className="size-4" />}
+          {isDone ? "Reabrir" : "Concluir"}
+        </button>
+      </div>
     </li>
   )
 }

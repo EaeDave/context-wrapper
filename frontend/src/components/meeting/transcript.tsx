@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState } from "react"
-import { FileText, Pencil, UserCircle, Fingerprint } from "lucide-react"
+import { FileText, Pencil, UserCircle, Fingerprint, Quote } from "lucide-react"
 import { useQueryClient, useMutation } from "@tanstack/react-query"
 import { toast } from "sonner"
 import type { TranscriptGroup } from "@/lib/types"
@@ -31,10 +31,27 @@ function speakerClass(speaker: string): string {
   if (/^SPEAKER_\d+$/.test(speaker)) return "text-amber-500 font-medium"
   return "text-emerald-600 font-medium dark:text-emerald-400"
 }
+function normalizeEvidenceText(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("pt-BR")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+}
+
+
 
 type EditMode =
   | { kind: "speaker"; group: TranscriptGroup }
   | { kind: "text"; group: TranscriptGroup }
+
+export interface TranscriptJumpTarget {
+  seconds: number
+  quote?: string | null
+  requestId: number
+}
+
 
 interface TranscriptProps {
   meetingId: number
@@ -42,6 +59,7 @@ interface TranscriptProps {
   participants: string[]
   currentTime: number
   seekTo: (seconds: number) => void
+  jumpTarget?: TranscriptJumpTarget | null
   speakerMatches?: Record<string, number>
 }
 
@@ -51,10 +69,12 @@ export function Transcript({
   participants,
   currentTime,
   seekTo,
+  jumpTarget,
   speakerMatches,
 }: TranscriptProps) {
   const [autoScroll, setAutoScroll] = useState(false)
-  const activeRef = useRef<HTMLDivElement | null>(null)
+  const [jumpIndex, setJumpIndex] = useState<number | null>(null)
+  const groupRefs = useRef<Map<number, HTMLDivElement>>(new Map())
   const queryClient = useQueryClient()
 
   // Edit state
@@ -74,10 +94,67 @@ export function Transcript({
   }
 
   useEffect(() => {
-    if (autoScroll && activeIndex >= 0 && activeRef.current) {
-      activeRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" })
+    if (autoScroll && activeIndex >= 0) {
+      groupRefs.current
+        .get(activeIndex)
+        ?.scrollIntoView({ behavior: "smooth", block: "nearest" })
     }
   }, [autoScroll, activeIndex])
+
+  useEffect(() => {
+    if (!jumpTarget || groups.length === 0) return
+
+    let targetIndex = 0
+    for (let i = 0; i < groups.length; i++) {
+      if (groups[i].start <= jumpTarget.seconds) targetIndex = i
+      else break
+    }
+
+    const quote = normalizeEvidenceText(jumpTarget.quote ?? "")
+    if (quote) {
+      const normalizedGroups = groups.map((group) =>
+        normalizeEvidenceText(group.text),
+      )
+      const sequenceIndexes = normalizedGroups.flatMap((firstText, index) => {
+        let combined = firstText
+        for (let offset = 1; offset < 3 && index + offset < groups.length; offset++) {
+          combined += ` ${normalizedGroups[index + offset]}`
+        }
+        const quoteOffset = combined.indexOf(quote)
+        return quoteOffset >= 0 && quoteOffset < firstText.length ? [index] : []
+      })
+      const quotedIndexes = sequenceIndexes.length > 0
+        ? sequenceIndexes
+        : normalizedGroups.flatMap((text, index) =>
+            text.includes(quote) || (text.length >= 24 && quote.includes(text))
+              ? [index]
+              : [],
+          )
+      if (quotedIndexes.length > 0) {
+        targetIndex = quotedIndexes.reduce((nearest, index) =>
+          Math.abs(groups[index].start - jumpTarget.seconds) <
+          Math.abs(groups[nearest].start - jumpTarget.seconds)
+            ? index
+            : nearest,
+        )
+      }
+    }
+
+    setJumpIndex(targetIndex)
+    const frame = window.requestAnimationFrame(() => {
+      const target = groupRefs.current.get(targetIndex)
+      target?.scrollIntoView({ behavior: "smooth", block: "center" })
+      target?.focus({ preventScroll: true })
+    })
+    const timeout = window.setTimeout(() => {
+      setJumpIndex((current) => (current === targetIndex ? null : current))
+    }, 4_000)
+
+    return () => {
+      window.cancelAnimationFrame(frame)
+      window.clearTimeout(timeout)
+    }
+  }, [groups, jumpTarget])
 
   const updateMutation = useMutation({
     mutationFn: (body: { seg_ids: number[]; text?: string; speaker?: string }) =>
@@ -144,13 +221,21 @@ export function Transcript({
           <div className="space-y-0.5">
             {groups.map((g, i) => {
               const isActive = i === activeIndex
+              const isJumpTarget = i === jumpIndex
               return (
                 <div
                   key={i}
-                  ref={isActive ? activeRef : null}
+                  ref={(node) => {
+                    if (node) groupRefs.current.set(i, node)
+                    else groupRefs.current.delete(i)
+                  }}
+                  tabIndex={-1}
+                  data-transcript-start={g.start}
                   className={cn(
-                    "group grid grid-cols-[5rem_1fr_auto] gap-3 rounded-md px-2 py-1.5 transition-colors",
-                    isActive && "border-l-2 border-l-primary bg-primary/5",
+                    "group grid grid-cols-[5rem_1fr_auto] gap-3 rounded-md px-2 py-1.5 transition-all duration-300 focus:outline-none",
+                    isActive && !isJumpTarget && "border-l-2 border-l-primary bg-primary/5",
+                    isJumpTarget &&
+                      "border-l-4 border-l-primary bg-primary/15 shadow-lg shadow-primary/10 ring-2 ring-primary/60",
                   )}
                 >
                   {/* Timestamp */}
@@ -169,17 +254,25 @@ export function Transcript({
 
                   {/* Speaker + text */}
                   <div>
-                    <span className={cn("inline-flex items-center gap-1 text-xs", speakerClass(g.speaker))}>
-                      {g.speaker}
-                      {speakerMatches?.[g.speaker] != null && (
-                        <span
-                          title={`reconhecido por voz — similaridade ${speakerMatches[g.speaker].toFixed(2)}`}
-                          className="inline-flex"
-                        >
-                          <Fingerprint className="size-3 opacity-50" />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={cn("inline-flex items-center gap-1 text-xs", speakerClass(g.speaker))}>
+                        {g.speaker}
+                        {speakerMatches?.[g.speaker] != null && (
+                          <span
+                            title={`reconhecido por voz — similaridade ${speakerMatches[g.speaker].toFixed(2)}`}
+                            className="inline-flex"
+                          >
+                            <Fingerprint className="size-3 opacity-50" />
+                          </span>
+                        )}
+                      </span>
+                      {isJumpTarget && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground">
+                          <Quote className="size-2.5" />
+                          trecho citado
                         </span>
                       )}
-                    </span>
+                    </div>
                     <p className="mt-0.5 text-sm leading-relaxed">{g.text}</p>
                   </div>
 

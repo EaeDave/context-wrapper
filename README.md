@@ -25,6 +25,10 @@ gravação (OBS) ──> wav 16k ──> transcrição + diarização ──> LL
   inferido e se a evidência pôde ser confirmada no transcript. A mesma regra
   vale ao processar, reprocessar ou reextrair. **Jobs internos:** `process`,
   `reprocess`, `reextract`.
+- Na página da reunião, o timestamp de uma tarefa ou fato navega ao mesmo tempo
+  para a mídia e para o turno correspondente no transcript. A citação da
+  evidência desambigua falas sobrepostas; o turno recebe foco, rolagem
+  centralizada e destaque temporário para preservar o contexto da extração.
 - O Task Studio abre como lista pessoal: inclui tarefas sem responsável ou com
   `me` entre os responsáveis e deixa tarefas exclusivas de terceiros na visão
   “Delegadas”. É possível alternar entre abertas, concluídas e todas, além de

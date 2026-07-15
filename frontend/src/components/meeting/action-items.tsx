@@ -87,7 +87,7 @@ function parseAssignedTo(raw: string): string[] | null {
 interface ActionItemsProps {
   meetingId: number
   items: ActionItem[]
-  onSeek?: (seconds: number) => void
+  onSeek?: (seconds: number, quote?: string | null) => void
 }
 
 export function ActionItems({ meetingId, items, onSeek }: ActionItemsProps) {
@@ -291,9 +291,11 @@ export function ActionItems({ meetingId, items, onSeek }: ActionItemsProps) {
                       {item.source_start != null && (
                         <button
                           type="button"
-                          onClick={() => onSeek?.(item.source_start!)}
-                          className="inline-flex items-center gap-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground transition-colors"
-                          title={item.evidence_quote ?? undefined}
+                          onClick={() =>
+                            onSeek?.(item.source_start!, item.evidence_quote)
+                          }
+                          className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/5 px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary transition-colors hover:border-primary/60 hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          title="Ir para o trecho citado na transcrição"
                         >
                           <Clock className="size-2.5" />
                           {formatTs(item.source_start)}

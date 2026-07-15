@@ -65,6 +65,7 @@ import {
 import { Player } from "@/components/meeting/player"
 import type { PlayerHandle } from "@/components/meeting/player"
 import { Transcript } from "@/components/meeting/transcript"
+import type { TranscriptJumpTarget } from "@/components/meeting/transcript"
 import { ActionItems } from "@/components/meeting/action-items"
 import { SpeakerAssign } from "@/components/meeting/speaker-assign"
 import { ManageCard } from "@/components/meeting/manage"
@@ -312,6 +313,8 @@ export default function MeetingDetailPage() {
 
   const playerRef = useRef<PlayerHandle>(null)
   const [currentTime, setCurrentTime] = useState(0)
+  const jumpRequestId = useRef(0)
+  const [transcriptJump, setTranscriptJump] = useState<TranscriptJumpTarget | null>(null)
 
   // Rename dialog
   const [renameOpen, setRenameOpen] = useState(false)
@@ -421,6 +424,12 @@ export default function MeetingDetailPage() {
     playerRef.current?.seekTo(seconds)
   }, [])
 
+  const navigateToEvidence = useCallback((seconds: number, quote?: string | null) => {
+    playerRef.current?.seekTo(seconds)
+    jumpRequestId.current += 1
+    setTranscriptJump({ seconds, quote, requestId: jumpRequestId.current })
+  }, [])
+
   // ── Render states ────────────────────────────────────────────────────────
   if (isLoading) return <PageSkeleton />
 
@@ -500,9 +509,13 @@ export default function MeetingDetailPage() {
 
           {meeting.pending.length > 0 && <SpeakerAssign meeting={meeting} />}
 
-          <ActionItems meetingId={meetingId} items={meeting.action_items} onSeek={seekTo} />
+          <ActionItems
+            meetingId={meetingId}
+            items={meeting.action_items}
+            onSeek={navigateToEvidence}
+          />
 
-          <MeetingFacts facts={meeting.facts ?? []} onSeek={seekTo} />
+          <MeetingFacts facts={meeting.facts ?? []} onSeek={navigateToEvidence} />
 
           <Transcript
             meetingId={meetingId}
@@ -510,6 +523,7 @@ export default function MeetingDetailPage() {
             participants={meeting.participants}
             currentTime={currentTime}
             seekTo={seekTo}
+            jumpTarget={transcriptJump}
             speakerMatches={meeting.speaker_matches}
           />
         </main>

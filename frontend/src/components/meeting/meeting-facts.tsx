@@ -37,7 +37,7 @@ const KIND_ORDER: MeetingFact["kind"][] = [
 
 interface MeetingFactsProps {
   facts: MeetingFact[]
-  onSeek?: (seconds: number) => void
+  onSeek?: (seconds: number, quote?: string | null) => void
 }
 
 export function MeetingFacts({ facts, onSeek }: MeetingFactsProps) {
@@ -101,9 +101,11 @@ export function MeetingFacts({ facts, onSeek }: MeetingFactsProps) {
                       {fact.source_start != null && (
                         <button
                           type="button"
-                          onClick={() => onSeek?.(fact.source_start!)}
-                          className="inline-flex items-center gap-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground transition-colors"
-                          title="Ir para este momento no player"
+                          onClick={() =>
+                            onSeek?.(fact.source_start!, fact.evidence_quote)
+                          }
+                          className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/5 px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary transition-colors hover:border-primary/60 hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          title="Ir para o trecho citado na transcrição"
                         >
                           <Clock className="size-2.5" />
                           {formatTs(fact.source_start)}
