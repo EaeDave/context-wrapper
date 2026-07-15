@@ -4,18 +4,52 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import httpx
+
 from .config import Settings
 from .models import ActionItem, MeetingFact, TranscriptSegment
 
-# Reuniões que cabem neste limite mantêm a chamada única existente.
-_MAX_TRANSCRIPT_CHARS = 100_000
-_CHUNK_TRANSCRIPT_CHARS = 40_000
-_CHUNK_OVERLAP_CHARS = 4_000
+# Reuniões densas geram saídas maiores que o transcript sugere. Dividir cedo
+# limita cada resposta e evita perder o documento inteiro por truncamento.
+_MAX_TRANSCRIPT_CHARS = 12_000
+_CHUNK_TRANSCRIPT_CHARS = 10_000
+_CHUNK_OVERLAP_CHARS = 1_000
+_MAX_OUTPUT_TOKENS = 16_384
+_MAX_SINGLE_CALL_SECONDS = 10 * 60
+_CHUNK_MAX_SECONDS = 8 * 60
 ExtractionProgressCallback = Callable[[float | None, str], None]
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 429})
+_MATCH_STOPWORDS = frozenset(
+    {
+        "a",
+        "ao",
+        "aos",
+        "as",
+        "da",
+        "das",
+        "de",
+        "do",
+        "dos",
+        "e",
+        "em",
+        "na",
+        "nas",
+        "no",
+        "nos",
+        "o",
+        "os",
+        "para",
+        "por",
+        "uma",
+        "um",
+    }
+)
+_HTTP_RETRY_DELAYS = (1.0, 2.0)
 
 # Prompt do sistema em PT-BR — usa __PARTICIPANTS__ como placeholder.
 _SYSTEM_PROMPT = """\
@@ -64,6 +98,7 @@ REGRAS DE RASTREABILIDADE:
 - explicitness: "explicit" quando mencionado diretamente; "inferred" quando deduzido por contexto.
 - assigned_to: array JSON de responsáveis (use "me" para o dono das notas); null se indefinido. Inclua TODAS as tarefas, inclusive atribuídas a terceiros.
 - Não invente timestamps, citações ou responsáveis.
+- Cada fato ou tarefa distinta deve aparecer uma única vez; não repita itens.
 """
 
 _CHUNK_SYSTEM_PROMPT = """\
@@ -105,55 +140,80 @@ Schema exato:
 }
 
 Não invente timestamps, responsáveis ou citações.
+Não repita decisões, requisitos, restrições, questões ou tarefas.
 """
 
 _CONSOLIDATE_SYSTEM_PROMPT = """\
 Você consolida análises temporais de uma única reunião técnica. Retorne SOMENTE JSON válido.
 
-Produza visão global coerente, preservando detalhes técnicos e rastreabilidade de TODOS os
-blocos. Resolva correções ou reatribuições posteriores pela ordem dos blocos. Remova duplicatas
-sem perder detalhes e mantenha os timestamps de origem recebidos.
+Produza visão global coerente usando a ordem dos blocos. Considere decisões, requisitos,
+restrições, questões e tarefas fornecidas apenas para compor o título e o resumo. Resolva
+correções posteriores pela ordem temporal.
 
 O JSON final deve seguir exatamente este schema:
 {
   "title": "<título conciso em PT-BR>",
-  "summary": "<resumo executivo em PT-BR, 3-6 frases, incluindo decisões e requisitos centrais>",
-  "facts": [
-    {
-      "kind": "<decision | requirement | constraint | open_question>",
-      "text": "<texto literal>",
-      "source_start": "<HH:MM:SS ou null>",
-      "source_end": "<HH:MM:SS ou null>",
-      "evidence_quote": "<trecho literal ou null>",
-      "explicitness": "<explicit | inferred>"
-    }
-  ],
-  "action_items": [
-    {
-      "what": "<o que precisa ser feito>",
-      "where": "<tela, endpoint, módulo, repositório ou null>",
-      "details": "<detalhes técnicos literais ou null>",
-      "requested_by": "<quem pediu ou null>",
-      "assigned_to": ["me"] ou ["Alice","me"] ou ["terceiro"] ou null,
-      "priority": "<alta | media | baixa>",
-      "source_start": "<HH:MM:SS ou null>",
-      "source_end": "<HH:MM:SS ou null>",
-      "evidence_quote": "<trecho literal ou null>",
-      "explicitness": "<explicit | inferred>"
-    }
-  ]
+  "summary": "<resumo executivo em PT-BR, 3-6 frases, incluindo decisões e requisitos centrais>"
 }
 
 Participantes identificados: __PARTICIPANTS__
 
-Inclua TODAS as tarefas de todos os blocos, inclusive as de terceiros.
-Não invente timestamps, citações ou responsáveis.
+Não reemita fatos ou tarefas. Não inclua outras chaves.
 """
 
 
 # ---------------------------------------------------------------------------
 # Providers
 # ---------------------------------------------------------------------------
+
+
+class LLMOutputTruncated(RuntimeError):
+    """Provider encerrou resposta antes de completar o documento."""
+
+    def __init__(self, partial: str = "") -> None:
+        super().__init__("A resposta da LLM atingiu o limite de saída.")
+        self.partial = partial
+
+
+def _complete_provider_text(text: str, stop_reason: object = None) -> str:
+    reason = str(stop_reason or "").casefold()
+    if reason in {"max_tokens", "max_output_tokens", "length"} or "max_output" in reason:
+        raise LLMOutputTruncated(text)
+    if not text:
+        raise RuntimeError(f"Resposta da LLM concluída sem texto (motivo={stop_reason!r}).")
+    return text
+
+def _is_transient_http_status(status_code: int) -> bool:
+    return status_code in _TRANSIENT_HTTP_STATUSES or status_code >= 500
+
+
+def _anthropic_post_with_retry(
+    client: httpx.Client,
+    url: str,
+    *,
+    payload: dict,
+    headers: dict,
+) -> httpx.Response:
+    """Repete somente falhas transitórias de transporte/gateway."""
+    last_error: httpx.TransportError | None = None
+    for attempt in range(len(_HTTP_RETRY_DELAYS) + 1):
+        try:
+            response = client.post(url, json=payload, headers=headers)
+        except httpx.TransportError as exc:
+            last_error = exc
+        else:
+            if not _is_transient_http_status(response.status_code):
+                return response
+            last_error = None
+            if attempt == len(_HTTP_RETRY_DELAYS):
+                return response
+        if attempt < len(_HTTP_RETRY_DELAYS):
+            time.sleep(_HTTP_RETRY_DELAYS[attempt])
+    if last_error is not None:
+        raise last_error
+    raise AssertionError("retry HTTP sem resposta ou erro")
+
+
 
 
 class LLMProvider(ABC):
@@ -172,11 +232,16 @@ class AnthropicProvider(LLMProvider):
         client = anthropic.Anthropic(api_key=self._api_key)
         msg = client.messages.create(
             model=self._model,
-            max_tokens=8192,
+            max_tokens=_MAX_OUTPUT_TOKENS,
             system=system,
             messages=[{"role": "user", "content": user}],
         )
-        return msg.content[0].text  # type: ignore[union-attr]
+        text = "".join(
+            block.text
+            for block in msg.content
+            if getattr(block, "type", None) == "text"
+        )
+        return _complete_provider_text(text, msg.stop_reason)
 
 
 class OpenAIProvider(LLMProvider):
@@ -195,7 +260,11 @@ class OpenAIProvider(LLMProvider):
                 {"role": "user", "content": user},
             ],
         )
-        return resp.choices[0].message.content or ""
+        choice = resp.choices[0]
+        return _complete_provider_text(
+            choice.message.content or "",
+            choice.finish_reason,
+        )
 
 
 
@@ -276,6 +345,7 @@ class OpenAIOAuthProvider(LLMProvider):
         def request(current_access: str) -> tuple[str, bool]:
             headers["Authorization"] = f"Bearer {current_access}"
             parts: list[str] = []
+            stop_reason: object = None
             with httpx.Client(timeout=300) as client:
                 with client.stream(
                     "POST",
@@ -301,17 +371,21 @@ class OpenAIOAuthProvider(LLMProvider):
                         except json.JSONDecodeError:
                             continue
                         kind = event.get("type")
+                        response = event.get("response") or {}
                         if kind == "response.output_text.delta":
                             parts.append(event.get("delta") or "")
+                        elif kind == "response.incomplete":
+                            details = response.get("incomplete_details") or {}
+                            stop_reason = details.get("reason") or "max_output_tokens"
                         elif kind == "response.failed":
-                            error = (event.get("response") or {}).get("error") or {}
+                            error = response.get("error") or {}
                             detail = error.get("message") or error.get("code") or "falha desconhecida"
                             raise RuntimeError(f"Resposta OpenAI falhou: {detail}")
                         elif kind == "error":
                             error = event.get("error") or event
                             detail = error.get("message") or error.get("code") or "falha desconhecida"
                             raise RuntimeError(f"Stream OpenAI falhou: {detail}")
-            return "".join(parts), False
+            return _complete_provider_text("".join(parts), stop_reason), False
 
         result, unauthorized = request(access)
         if unauthorized:
@@ -324,8 +398,6 @@ class OpenAIOAuthProvider(LLMProvider):
                 "Sessão OpenAI expirada ou revogada. "
                 "Reconecte sua conta na página Configurações."
             )
-        if not result:
-            raise RuntimeError("Resposta OpenAI concluída sem texto.")
         return result
 
 
@@ -347,7 +419,11 @@ class OllamaProvider(LLMProvider):
         }
         resp = httpx.post(f"{self._url}/api/chat", json=payload, timeout=300.0)
         resp.raise_for_status()
-        return resp.json()["message"]["content"]
+        data = resp.json()
+        return _complete_provider_text(
+            data.get("message", {}).get("content", ""),
+            data.get("done_reason"),
+        )
 
 
 class ClaudeCodeProvider(LLMProvider):
@@ -409,26 +485,21 @@ class AnthropicOAuthProvider(LLMProvider):
         ]
         payload = {
             "model": self._model,
-            "max_tokens": 8192,
+            "max_tokens": _MAX_OUTPUT_TOKENS,
             "system": system_blocks,
             "messages": [{"role": "user", "content": user}],
         }
         with httpx.Client(timeout=300) as client:
-            resp = client.post(
+            resp = _anthropic_post_with_retry(
+                client,
                 "https://api.anthropic.com/v1/messages",
-                json=payload,
+                payload=payload,
                 headers=headers,
             )
             _check_response(resp)
         data = resp.json()
         parts = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
-        if not parts:
-            blocks = [b.get("type") for b in data.get("content", [])]
-            raise RuntimeError(
-                f"Resposta sem bloco de texto (stop_reason={data.get('stop_reason')}, "
-                f"blocks={blocks})."
-            )
-        return "".join(parts)
+        return _complete_provider_text("".join(parts), data.get("stop_reason"))
 
 
 
@@ -519,18 +590,20 @@ class TranscriptChunk:
     end: float
     text: str
 
-
 def _split_transcript(
     segments: list[TranscriptSegment],
     *,
     max_chars: int = _CHUNK_TRANSCRIPT_CHARS,
     overlap_chars: int = _CHUNK_OVERLAP_CHARS,
+    max_seconds: float = _CHUNK_MAX_SECONDS,
 ) -> list[TranscriptChunk]:
-    """Divide em turnos inteiros; overlap repete contexto sem perder segmentos."""
+    """Divide em turnos inteiros por tamanho e duração, mantendo overlap."""
     if max_chars <= 0:
         raise ValueError("max_chars deve ser positivo")
     if overlap_chars < 0 or overlap_chars >= max_chars:
         raise ValueError("overlap_chars deve estar entre 0 e max_chars")
+    if max_seconds <= 0:
+        raise ValueError("max_seconds deve ser positivo")
     if not segments:
         return []
 
@@ -542,7 +615,11 @@ def _split_transcript(
         size = 0
         while end_index < len(segments):
             addition = len(rendered[end_index]) + (1 if end_index > start_index else 0)
-            if end_index > start_index and size + addition > max_chars:
+            exceeds_chars = size + addition > max_chars
+            exceeds_duration = (
+                segments[end_index].end - segments[start_index].start > max_seconds
+            )
+            if end_index > start_index and (exceeds_chars or exceeds_duration):
                 break
             size += addition
             end_index += 1
@@ -744,43 +821,108 @@ def _fact_from_dict(
     )
 
 
+_TRUNCATION_RETRY_PROMPT = """\
+
+
+RETENTATIVA APÓS LIMITE DE SAÍDA:
+- Responda novamente desde o início com um único objeto JSON completo.
+- Seja conciso em summary, text, what e details.
+- Use a menor evidence_quote literal que ainda sustente cada item.
+- Não repita nenhum fato ou tarefa.
+- Termine todas as listas e feche o objeto JSON.
+"""
+
+
 def _complete_json(provider: LLMProvider, system: str, user: str) -> dict:
-    response = provider.complete(system, user)
-    try:
-        return _parse_json_response(response)
-    except ValueError:
-        raise ValueError(response) from None
+    for attempt in range(2):
+        try:
+            response = provider.complete(system, user)
+        except LLMOutputTruncated as exc:
+            if attempt == 0:
+                system += _TRUNCATION_RETRY_PROMPT
+                continue
+            raise RuntimeError(
+                "A resposta da LLM atingiu o limite de saída duas vezes. "
+                "Reduza o conteúdo analisado ou use um modelo com maior limite."
+            ) from exc
+        try:
+            return _parse_json_response(response)
+        except ValueError:
+            preview = response[:500].replace("\n", " ")
+            raise ValueError(
+                "A LLM retornou JSON inválido "
+                f"({len(response)} caracteres). Início: {preview}"
+            ) from None
+
+
+
+
+def _normalize_match_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(re.sub(r"[^\w]+", " ", value.casefold()).split())
 
 
 def _item_key(item: dict) -> tuple[str, str]:
-    def normalize(value: object) -> str:
-        if not isinstance(value, str):
-            return ""
-        return " ".join(value.casefold().split())
+    return _normalize_match_text(item.get("what")), _normalize_match_text(
+        item.get("where")
+    )
 
-    return normalize(item.get("what")), normalize(item.get("where"))
+
+def _source_ranges_overlap(left: dict, right: dict) -> bool:
+    left_start = _parse_hms(left.get("source_start"))
+    left_end = _parse_hms(left.get("source_end"))
+    right_start = _parse_hms(right.get("source_start"))
+    right_end = _parse_hms(right.get("source_end"))
+    if None in {left_start, left_end, right_start, right_end}:
+        return False
+    return bool(left_start <= right_end and right_start <= left_end)
+
+
+def _records_overlap(left: dict, right: dict, text_field: str) -> bool:
+    left_text = _normalize_match_text(left.get(text_field))
+    right_text = _normalize_match_text(right.get(text_field))
+    if not left_text or not right_text:
+        return False
+    if left_text == right_text:
+        return True
+    if not _source_ranges_overlap(left, right):
+        return False
+    left_terms = tuple(
+        term for term in left_text.split() if term not in _MATCH_STOPWORDS
+    )
+    right_terms = tuple(
+        term for term in right_text.split() if term not in _MATCH_STOPWORDS
+    )
+    return bool(left_terms and left_terms == right_terms)
 
 
 def _deduplicate_action_items(items: list[dict]) -> list[dict]:
-    """Une duplicatas exatas sem perder detalhes, urgência ou intervalo de origem."""
+    """Une tarefas repetidas pelo overlap sem perder detalhes ou origem."""
     result: list[dict] = []
-    positions: dict[tuple[str, str], int] = {}
     priority_rank = {"baixa": 0, "media": 1, "alta": 2}
 
     for item in items:
         key = _item_key(item)
-        if not key[0] or key not in positions:
-            positions[key] = len(result)
+        duplicate = next(
+            (
+                existing
+                for existing in result
+                if _item_key(existing) == key
+                or _records_overlap(existing, item, "what")
+            ),
+            None,
+        )
+        if not key[0] or duplicate is None:
             result.append(dict(item))
             continue
 
-        existing = result[positions[key]]
-        if not existing.get("requested_by") and item.get("requested_by"):
-            existing["requested_by"] = item["requested_by"]
+        if not duplicate.get("requested_by") and item.get("requested_by"):
+            duplicate["requested_by"] = item["requested_by"]
 
         owners: list[str] = []
         seen_owners: set[str] = set()
-        for raw in (existing.get("assigned_to"), item.get("assigned_to")):
+        for raw in (duplicate.get("assigned_to"), item.get("assigned_to")):
             values = raw if isinstance(raw, list) else [raw]
             for owner in values:
                 if not isinstance(owner, str) or not owner.strip():
@@ -790,39 +932,73 @@ def _deduplicate_action_items(items: list[dict]) -> list[dict]:
                     owners.append(owner.strip())
                     seen_owners.add(normalized)
         if owners:
-            existing["assigned_to"] = owners
+            duplicate["assigned_to"] = owners
 
-        if not existing.get("evidence_quote") and item.get("evidence_quote"):
-            existing["evidence_quote"] = item["evidence_quote"]
-        if existing.get("explicitness") != "explicit" and item.get("explicitness") == "explicit":
-            existing["explicitness"] = "explicit"
-        existing_details = existing.get("details")
+        if not duplicate.get("evidence_quote") and item.get("evidence_quote"):
+            duplicate["evidence_quote"] = item["evidence_quote"]
+        if duplicate.get("explicitness") != "explicit" and item.get("explicitness") == "explicit":
+            duplicate["explicitness"] = "explicit"
+        existing_details = duplicate.get("details")
         new_details = item.get("details")
         if not existing_details and new_details:
-            existing["details"] = new_details
+            duplicate["details"] = new_details
         elif (
             isinstance(existing_details, str)
             and isinstance(new_details, str)
             and existing_details.casefold().strip() != new_details.casefold().strip()
         ):
-            existing["details"] = f"{existing_details.strip()}\n{new_details.strip()}"
+            duplicate["details"] = f"{existing_details.strip()}\n{new_details.strip()}"
 
-        existing_priority = existing.get("priority")
-        new_priority = item.get("priority")
-        if priority_rank.get(new_priority, -1) > priority_rank.get(existing_priority, -1):
-            existing["priority"] = new_priority
-
-        new_start = item.get("source_start")
-        if new_start and (
-            not existing.get("source_start") or new_start < existing["source_start"]
+        if priority_rank.get(item.get("priority"), -1) > priority_rank.get(
+            duplicate.get("priority"), -1
         ):
-            existing["source_start"] = new_start
-        new_end = item.get("source_end")
-        if new_end and (
-            not existing.get("source_end") or new_end > existing["source_end"]
+            duplicate["priority"] = item["priority"]
+        if item.get("source_start") and (
+            not duplicate.get("source_start")
+            or item["source_start"] < duplicate["source_start"]
         ):
-            existing["source_end"] = new_end
+            duplicate["source_start"] = item["source_start"]
+        if item.get("source_end") and (
+            not duplicate.get("source_end")
+            or item["source_end"] > duplicate["source_end"]
+        ):
+            duplicate["source_end"] = item["source_end"]
 
+    return result
+
+
+def _deduplicate_facts(items: list[dict]) -> list[dict]:
+    """Une fatos repetidos pelo overlap sem colapsar fatos distintos do trecho."""
+    result: list[dict] = []
+    for item in items:
+        duplicate = next(
+            (
+                existing
+                for existing in result
+                if existing.get("kind") == item.get("kind")
+                and _records_overlap(existing, item, "text")
+            ),
+            None,
+        )
+        if duplicate is None:
+            result.append(dict(item))
+            continue
+        if len(str(item.get("text") or "")) > len(str(duplicate.get("text") or "")):
+            duplicate["text"] = item["text"]
+        if not duplicate.get("evidence_quote") and item.get("evidence_quote"):
+            duplicate["evidence_quote"] = item["evidence_quote"]
+        if duplicate.get("explicitness") != "explicit" and item.get("explicitness") == "explicit":
+            duplicate["explicitness"] = "explicit"
+        if item.get("source_start") and (
+            not duplicate.get("source_start")
+            or item["source_start"] < duplicate["source_start"]
+        ):
+            duplicate["source_start"] = item["source_start"]
+        if item.get("source_end") and (
+            not duplicate.get("source_end")
+            or item["source_end"] > duplicate["source_end"]
+        ):
+            duplicate["source_end"] = item["source_end"]
     return result
 
 
@@ -863,17 +1039,54 @@ def _analyse_chunks(
                 f"Bloco {block_number} de {len(chunks)} analisado",
             )
 
+    facts: list[dict] = []
+    action_items: list[dict] = []
+    summary_chunks: list[dict] = []
+    fact_lists = {
+        "decisions": "decision",
+        "requirements": "requirement",
+        "constraints": "constraint",
+        "open_questions": "open_question",
+    }
+    for entry in analyses:
+        analysis = entry["analysis"]
+        key_points: list[str] = []
+        for field, kind in fact_lists.items():
+            for raw_fact in analysis.get(field) or []:
+                if not isinstance(raw_fact, dict) or not raw_fact.get("text"):
+                    continue
+                fact = dict(raw_fact)
+                fact["kind"] = kind
+                facts.append(fact)
+                key_points.append(str(fact["text"]))
+        task_texts: list[str] = []
+        for raw_item in analysis.get("action_items") or []:
+            if not isinstance(raw_item, dict) or not raw_item.get("what"):
+                continue
+            action_items.append(raw_item)
+            task_texts.append(str(raw_item["what"]))
+        summary_chunks.append(
+            {
+                "chunk_index": entry["chunk_index"],
+                "chunk_summary": analysis.get("chunk_summary") or "",
+                "key_points": key_points,
+                "tasks": task_texts,
+            }
+        )
+
     if on_progress is not None:
         on_progress(None, "Consolidando análises dos blocos")
     system = _CONSOLIDATE_SYSTEM_PROMPT.replace(
         "__PARTICIPANTS__", participants_text
     )
     payload = json.dumps(
-        {"chunk_count": len(analyses), "chunks": analyses},
+        {"chunk_count": len(summary_chunks), "chunks": summary_chunks},
         ensure_ascii=False,
         separators=(",", ":"),
     )
     data = _complete_json(provider, system, payload)
+    data["facts"] = _deduplicate_facts(facts)
+    data["action_items"] = _deduplicate_action_items(action_items)
     if on_progress is not None:
         on_progress(1.0, "Resumo e tarefas consolidados")
     return data
@@ -929,7 +1142,8 @@ def extract(
     provider = get_provider(settings)
     transcript = _build_transcript(segments)
 
-    if len(transcript) <= _MAX_TRANSCRIPT_CHARS:
+    duration = max((segment.end for segment in segments), default=0.0)
+    if len(transcript) <= _MAX_TRANSCRIPT_CHARS and duration <= _MAX_SINGLE_CALL_SECONDS:
         if on_progress is not None:
             on_progress(None, "Gerando resumo e tarefas com LLM")
         part_str = ", ".join(participants) if participants else "não identificados"

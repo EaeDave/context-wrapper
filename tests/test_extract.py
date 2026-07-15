@@ -226,6 +226,22 @@ def test_split_transcript_valida_limites() -> None:
     with pytest.raises(ValueError):
         _split_transcript(_long_segments(), max_chars=100, overlap_chars=100)
 
+def test_split_transcript_limita_duracao_mesmo_com_texto_curto() -> None:
+    chunks = _split_transcript(
+        _long_segments(count=20, chars=1),
+        max_chars=100_000,
+        overlap_chars=0,
+        max_seconds=180,
+    )
+
+    assert len(chunks) > 1
+    assert all(chunk.end - chunk.start <= 180 for chunk in chunks)
+
+
+def test_split_transcript_rejeita_duracao_invalida() -> None:
+    with pytest.raises(ValueError, match="max_seconds"):
+        _split_transcript(_long_segments(), max_seconds=0)
+
 
 # ---------------------------------------------------------------------------
 # extract() — with fake LLMProvider injected via monkeypatch
@@ -335,25 +351,75 @@ def test_extract_longo_analisa_todos_blocos_e_consolida(
         def complete(self, system: str, user: str) -> str:
             calls.append((system, user))
             if "UM BLOCO temporal" in system:
+                block_number = sum("UM BLOCO temporal" in call[0] for call in calls)
                 first_timestamp = user.split("[", 1)[1].split("]", 1)[0]
+                decisions = [
+                    {
+                        "text": f"Decisão {first_timestamp}",
+                        "source_start": first_timestamp.split("-", 1)[0],
+                        "source_end": first_timestamp.split("-", 1)[1],
+                    }
+                ]
+                action_items: list[dict] = []
+                if block_number == 1:
+                    decisions.append(
+                        {
+                            "text": "Usar fila durável nos embarques",
+                            "source_start": "00:07:50",
+                            "source_end": "00:08:10",
+                            "explicitness": "inferred",
+                        }
+                    )
+                    action_items.append(
+                        {
+                            "what": "Atualizar /api/orders",
+                            "where": "/api/orders",
+                            "assigned_to": "me",
+                            "source_start": "00:07:50",
+                            "source_end": "00:08:10",
+                        }
+                    )
+                elif block_number == 2:
+                    decisions.append(
+                        {
+                            "text": "Usar uma fila durável para os embarques",
+                            "source_start": "00:08:00",
+                            "source_end": "00:08:20",
+                            "evidence_quote": "vamos usar uma fila durável",
+                            "explicitness": "explicit",
+                        }
+                    )
+                    action_items.extend(
+                        [
+                            {
+                                "what": " atualizar /API/orders ",
+                                "where": "/API/orders",
+                                "assigned_to": "me",
+                                "details": "Preservar paginação",
+                                "source_start": "00:08:00",
+                                "source_end": "00:08:20",
+                            },
+                            {"what": "Alice migra o banco", "assigned_to": "Alice"},
+                            {
+                                "what": "Definir responsável pelo rollout",
+                                "assigned_to": None,
+                            },
+                        ]
+                    )
                 return json.dumps(
                     {
                         "chunk_summary": f"Síntese {first_timestamp}",
-                        "decisions": [
-                            {
-                                "what": f"Decisão {first_timestamp}",
-                                "source_start": first_timestamp.split("-", 1)[0],
-                                "source_end": first_timestamp.split("-", 1)[1],
-                            }
-                        ],
+                        "decisions": decisions,
                         "requirements": [
                             {
-                                "what": f"Requisito {first_timestamp}",
+                                "text": f"Requisito {first_timestamp}",
                                 "source_start": first_timestamp.split("-", 1)[0],
                                 "source_end": first_timestamp.split("-", 1)[1],
                             }
                         ],
-                        "action_items": [],
+                        "constraints": [],
+                        "open_questions": [],
+                        "action_items": action_items,
                     },
                     ensure_ascii=False,
                 )
@@ -361,23 +427,6 @@ def test_extract_longo_analisa_todos_blocos_e_consolida(
                 {
                     "title": "Reunião longa",
                     "summary": "Resumo consolidado com decisões e requisitos.",
-                    "action_items": [
-                        {
-                            "what": "Atualizar /api/orders",
-                            "where": "/api/orders",
-                            "assigned_to": "me",
-                            "source_start": "00:42:00",
-                            "source_end": "00:42:45",
-                        },
-                        {
-                            "what": " atualizar /API/orders ",
-                            "where": "/API/orders",
-                            "assigned_to": "me",
-                            "details": "Preservar paginação",
-                        },
-                        {"what": "Alice migra o banco", "assigned_to": "Alice"},
-                        {"what": "Definir responsável pelo rollout", "assigned_to": None},
-                    ],
                 },
                 ensure_ascii=False,
             )
@@ -404,21 +453,27 @@ def test_extract_longo_analisa_todos_blocos_e_consolida(
 
     consolidation = json.loads(calls[-1][1])
     assert consolidation["chunk_count"] == len(chunk_calls)
-    assert all(chunk["analysis"]["decisions"] for chunk in consolidation["chunks"])
-    assert all(chunk["analysis"]["requirements"] for chunk in consolidation["chunks"])
-    assert consolidation["chunks"][0]["source_start"] == "00:00:00"
-    assert consolidation["chunks"][-1]["source_end"] == "02:09:45"
+    assert all("analysis" not in chunk for chunk in consolidation["chunks"])
+    assert all(chunk["key_points"] for chunk in consolidation["chunks"])
+    assert "Não reemita fatos ou tarefas" in calls[-1][0]
 
     assert title == "Reunião longa"
     assert "decisões e requisitos" in summary
-    # All items returned (no owner filter at extract level)
     item_whats = [item.what.strip() for item in items]
-    assert "Atualizar /api/orders" in item_whats
+    assert item_whats.count("Atualizar /api/orders") == 1
     assert "Definir responsável pelo rollout" in item_whats
-    # Third-party item also included
     assert "Alice migra o banco" in item_whats
-    assert items[next(i for i, it in enumerate(items) if "Atualizar" in it.what)].details == "Preservar paginação"
-    assert isinstance(facts, list)
+    updated_orders = items[item_whats.index("Atualizar /api/orders")]
+    assert updated_orders.details == "Preservar paginação"
+    assert updated_orders.source_start == 7 * 60 + 50
+    assert updated_orders.source_end == 8 * 60 + 20
+
+    durable_queue = [fact for fact in facts if "fila durável" in fact.text]
+    assert len(durable_queue) == 1
+    assert durable_queue[0].explicitness == "explicit"
+    assert durable_queue[0].evidence_quote == "vamos usar uma fila durável"
+    assert any(fact.kind == "requirement" for fact in facts)
+    assert len(facts) == len(chunk_calls) * 2 + 1
 
     block_count = len(chunk_calls)
     assert progress[0] == (0.0, f"Analisando bloco 1 de {block_count}")
@@ -433,6 +488,232 @@ def test_extract_longo_analisa_todos_blocos_e_consolida(
     assert [
         detail for _value, detail in progress if detail.startswith("Analisando bloco")
     ] == [f"Analisando bloco {i} de {block_count}" for i in range(1, block_count + 1)]
+
+
+def test_deduplicate_facts_preserva_fatos_distintos_no_mesmo_trecho() -> None:
+    facts = extract_mod._deduplicate_facts(
+        [
+            {
+                "kind": "requirement",
+                "text": "Exibir o produto na tela de embarque",
+                "source_start": "00:08:00",
+                "source_end": "00:08:20",
+                "evidence_quote": "listar produto e volume",
+            },
+            {
+                "kind": "requirement",
+                "text": "Exibir o volume na tela de embarque",
+                "source_start": "00:08:00",
+                "source_end": "00:08:20",
+                "evidence_quote": "listar produto e volume",
+            },
+            {
+                "kind": "decision",
+                "text": "Usar lote como chave principal",
+            },
+            {
+                "kind": "decision",
+                "text": "Usar lote como chave principal",
+                "explicitness": "explicit",
+            },
+        ]
+    )
+
+    assert [fact["text"] for fact in facts] == [
+        "Exibir o produto na tela de embarque",
+        "Exibir o volume na tela de embarque",
+        "Usar lote como chave principal",
+    ]
+    assert facts[-1]["explicitness"] == "explicit"
+
+
+def test_complete_json_repete_uma_vez_apos_truncamento() -> None:
+    calls: list[str] = []
+
+    class TruncatedOnceProvider(LLMProvider):
+        def complete(self, system: str, user: str) -> str:
+            calls.append(system)
+            if len(calls) == 1:
+                raise extract_mod.LLMOutputTruncated('{"title":"cortado"')
+            return '{"title":"Completo","summary":"OK","action_items":[]}'
+
+    data = extract_mod._complete_json(TruncatedOnceProvider(), "sistema", "usuário")
+
+    assert data["title"] == "Completo"
+    assert len(calls) == 2
+    assert "RETENTATIVA APÓS LIMITE DE SAÍDA" in calls[1]
+
+
+def test_complete_json_falha_curto_apos_dois_truncamentos() -> None:
+    class AlwaysTruncatedProvider(LLMProvider):
+        def complete(self, system: str, user: str) -> str:
+            raise extract_mod.LLMOutputTruncated("x" * 9_000)
+
+    with pytest.raises(RuntimeError, match="duas vezes") as exc_info:
+        extract_mod._complete_json(AlwaysTruncatedProvider(), "sistema", "usuário")
+
+    assert len(str(exc_info.value)) < 200
+
+
+def test_complete_json_nao_expoe_resposta_invalida_inteira() -> None:
+    response = "x" * 9_000
+
+    with pytest.raises(ValueError, match="9000 caracteres") as exc_info:
+        extract_mod._complete_json(_FakeProvider(response), "sistema", "usuário")
+
+    assert len(str(exc_info.value)) < 700
+
+
+def test_extract_divide_reuniao_longa_com_transcript_curto(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class DurationProvider(LLMProvider):
+        def complete(self, system: str, user: str) -> str:
+            calls.append(system)
+            if "UM BLOCO temporal" in system:
+                return json.dumps({
+                    "chunk_summary": "Síntese",
+                    "decisions": [],
+                    "requirements": [],
+                    "constraints": [],
+                    "open_questions": [],
+                    "action_items": [],
+                })
+            return '{"title":"Longa","summary":"OK","facts":[],"action_items":[]}'
+
+    monkeypatch.setattr(extract_mod, "get_provider", lambda _: DurationProvider())
+    segments = _long_segments(count=12, chars=1)
+
+    extract(segments, ["me", "Alice"], _settings())
+
+    assert sum("UM BLOCO temporal" in system for system in calls) >= 2
+    assert "consolida análises temporais" in calls[-1]
+
+
+@pytest.mark.parametrize("status_code", [429, 500, 520])
+def test_anthropic_retry_recupera_http_transitorio(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    import httpx
+
+    calls: list[int] = []
+
+    class Client:
+        def post(self, *_args: object, **_kwargs: object) -> httpx.Response:
+            calls.append(1)
+            return httpx.Response(status_code if len(calls) == 1 else 200)
+
+    monkeypatch.setattr(extract_mod, "_HTTP_RETRY_DELAYS", (0.0,))
+    response = extract_mod._anthropic_post_with_retry(
+        Client(), "https://example.test", payload={}, headers={}
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 2
+
+
+def test_anthropic_retry_nao_repete_http_permanente(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    calls: list[int] = []
+
+    class Client:
+        def post(self, *_args: object, **_kwargs: object) -> httpx.Response:
+            calls.append(1)
+            return httpx.Response(400)
+
+    monkeypatch.setattr(extract_mod, "_HTTP_RETRY_DELAYS", (0.0,))
+    response = extract_mod._anthropic_post_with_retry(
+        Client(), "https://example.test", payload={}, headers={}
+    )
+
+    assert response.status_code == 400
+    assert len(calls) == 1
+
+
+def test_anthropic_retry_recupera_erro_de_transporte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    calls: list[int] = []
+
+    class Client:
+        def post(self, *_args: object, **_kwargs: object) -> httpx.Response:
+            calls.append(1)
+            if len(calls) == 1:
+                raise httpx.ConnectError("temporário")
+            return httpx.Response(200)
+
+    monkeypatch.setattr(extract_mod, "_HTTP_RETRY_DELAYS", (0.0,))
+    response = extract_mod._anthropic_post_with_retry(
+        Client(), "https://example.test", payload={}, headers={}
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 2
+
+
+def test_anthropic_oauth_detecta_limite_de_saida(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status_code = 200
+        def json(self) -> dict:
+            return {
+                "content": [{"type": "text", "text": '{"title":"cortado"'}],
+                "stop_reason": "max_tokens",
+            }
+
+    class Client:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> "Client":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def post(self, _url: str, *, json: dict, headers: dict) -> Response:
+            assert json["max_tokens"] == extract_mod._MAX_OUTPUT_TOKENS
+            assert headers["Authorization"] == "Bearer access"
+            return Response()
+
+    import httpx
+    import meet.anthropic_oauth as oauth_mod
+
+    monkeypatch.setattr(httpx, "Client", Client)
+    monkeypatch.setattr(oauth_mod, "get_access_token", lambda _settings: "access")
+    monkeypatch.setattr(oauth_mod, "_check_response", lambda _response: None)
+    provider = extract_mod.AnthropicOAuthProvider(_settings())
+
+    with pytest.raises(extract_mod.LLMOutputTruncated):
+        provider.complete("sistema", "usuário")
+
+
+def test_openai_api_detecta_finish_reason_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    import openai
+
+    response = SimpleNamespace(choices=[SimpleNamespace(
+        message=SimpleNamespace(content='{"title":"cortado"'),
+        finish_reason="length",
+    )])
+    completions = SimpleNamespace(create=lambda **_kwargs: response)
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    monkeypatch.setattr(openai, "OpenAI", lambda **_kwargs: client)
+    provider = extract_mod.OpenAIProvider("key", "gpt-4o")
+
+    with pytest.raises(extract_mod.LLMOutputTruncated):
+        provider.complete("sistema", "usuário")
 
 
 def test_extract_explica_identidade_e_atribuicao_ao_provider(

@@ -39,11 +39,16 @@ gravação (OBS) ──> wav 16k ──> transcrição + diarização ──> LL
   evidências e, opcionalmente, o transcript integral; ele só agrupa conteúdo já
   persistido, sem pedir nova geração à LLM. **Endpoint interno:**
   `POST /api/context/export`.
-- Em reuniões longas, nenhum trecho intermediário é descartado para caber no
-  contexto da LLM. O transcript é analisado em blocos temporais sobrepostos e
-  depois consolidado em ordem; decisões, requisitos, correções posteriores e
-  tarefas discutidas no meio da conversa participam do resultado final. A
-  reunião curta mantém a análise em uma única chamada. **Jobs internos:**
+- Em reuniões com mais de 10 minutos ou transcript denso, nenhum trecho
+  intermediário é descartado para caber no contexto da LLM. O transcript é
+  analisado em blocos temporais sobrepostos de até 8 minutos. Fatos e tarefas
+  vêm desses blocos, são unidos em ordem e têm duplicatas do overlap removidas
+  sem perder evidências ou timestamps; a consolidação final gera somente título
+  e resumo, evitando que listas extensas sejam cortadas. Decisões, requisitos,
+  correções posteriores e tarefas discutidas no meio da conversa participam do
+  resultado final. A reunião curta mantém uma única chamada. Resposta cortada
+  pelo limite da LLM é repetida uma vez em formato mais conciso; falhas
+  temporárias do gateway Anthropic também são repetidas antes de falhar o job. **Jobs internos:**
   `process`, `reprocess`, `reextract`; **integração externa:** LLM configurada.
 - Quando o LLM está habilitado, suas credenciais são validadas antes das etapas
   caras. Sessão Claude ou OpenAI expirada/revogada encerra o job imediatamente e
