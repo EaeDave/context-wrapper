@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import json
 import re
-import warnings
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 from .config import Settings
 from .models import ActionItem, TranscriptSegment
 
-# Limite aproximado de chars do transcript antes de truncar.
+# Reuniões que cabem neste limite mantêm a chamada única existente.
 _MAX_TRANSCRIPT_CHARS = 100_000
-_TRUNCATE_EACH_SIDE = 40_000
+_CHUNK_TRANSCRIPT_CHARS = 40_000
+_CHUNK_OVERLAP_CHARS = 4_000
 
 # Prompt do sistema em PT-BR — usa __PARTICIPANTS__ como placeholder.
 _SYSTEM_PROMPT = """\
@@ -57,6 +58,76 @@ REGRA OBRIGATÓRIA DE RESPONSABILIDADE DOS ACTION ITEMS:
   se alguém atribui explicitamente algo a "você" referindo-se a "me", inclua.
 - Se "me" não aparecer no transcript, não invente sua identidade. Ainda omita atribuições
   inequívocas a terceiros e mantenha como null somente o que de fato ficou sem dono claro.
+"""
+
+_CHUNK_SYSTEM_PROMPT = """\
+Você analisa UM BLOCO temporal de uma reunião técnica. Retorne SOMENTE JSON válido.
+
+Preserve literalmente nomes técnicos e classifique todos os candidatos, inclusive tarefas
+atribuídas a terceiros: a consolidação global decidirá o que entra na lista pessoal. Resolva
+"eu" usando o label do falante. Copie os timestamps do transcript para cada evidência.
+
+Schema exato:
+{
+  "chunk_summary": "<síntese factual e concisa do bloco>",
+  "decisions": [
+    {"what": "<decisão>", "source_start": "<HH:MM:SS>", "source_end": "<HH:MM:SS>"}
+  ],
+  "requirements": [
+    {"what": "<requisito>", "source_start": "<HH:MM:SS>", "source_end": "<HH:MM:SS>"}
+  ],
+  "action_items": [
+    {
+      "what": "<tarefa>",
+      "where": "<local técnico ou null>",
+      "details": "<detalhes literais ou null>",
+      "requested_by": "<quem pediu ou null>",
+      "assigned_to": "<me, nome/label de terceiro, lista de responsáveis, ou null>",
+      "priority": "<alta | media | baixa>",
+      "source_start": "<HH:MM:SS>",
+      "source_end": "<HH:MM:SS>"
+    }
+  ]
+}
+
+Use null em assigned_to somente quando o bloco realmente não define responsável. Não invente
+decisões, requisitos, tarefas, responsáveis ou timestamps.
+"""
+
+_CONSOLIDATE_SYSTEM_PROMPT = """\
+Você consolida análises temporais de uma única reunião técnica. Retorne SOMENTE JSON válido.
+
+Produza visão global coerente, preservando detalhes técnicos, decisões e requisitos de TODOS os
+blocos. Resolva correções ou reatribuições posteriores pela ordem dos blocos. Remova duplicatas
+sem perder detalhes e mantenha os timestamps de origem recebidos.
+
+O JSON final deve seguir exatamente este schema:
+{
+  "title": "<título conciso em PT-BR>",
+  "summary": "<resumo executivo em PT-BR, 3-6 frases, incluindo decisões e requisitos centrais>",
+  "action_items": [
+    {
+      "what": "<o que precisa ser feito>",
+      "where": "<tela, endpoint, módulo, repositório ou null>",
+      "details": "<detalhes técnicos literais ou null>",
+      "requested_by": "<quem pediu ou null>",
+      "assigned_to": "<me, lista incluindo me, terceiro, ou null>",
+      "priority": "<alta | media | baixa>",
+      "source_start": "<HH:MM:SS>",
+      "source_end": "<HH:MM:SS>"
+    }
+  ]
+}
+
+Participantes identificados: __PARTICIPANTS__
+
+REGRA OBRIGATÓRIA DA LISTA PESSOAL:
+- Inclua tarefas atribuídas a "me", compartilhadas que incluam "me" e tarefas realmente sem
+  responsável claro.
+- Exclua tarefas atribuídas explicitamente somente a terceiros.
+- requested_by identifica quem pediu, nunca quem executará.
+- Se "me" não existir entre os participantes, não invente sua identidade: mantenha somente
+  tarefas sem dono claro e exclua atribuições inequívocas a terceiros.
 """
 
 
@@ -264,33 +335,82 @@ def validate_credentials(settings: Settings) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _fmt_mm_ss(seconds: float) -> str:
-    total = int(seconds)
-    m, s = divmod(total, 60)
-    return f"{m:02d}:{s:02d}"
+def _fmt_timestamp(seconds: float) -> str:
+    total = max(int(seconds), 0)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _render_segment(seg: TranscriptSegment) -> str:
+    speaker = seg.speaker or "Desconhecido"
+    start = _fmt_timestamp(seg.start)
+    end = _fmt_timestamp(seg.end)
+    return f"[{start}-{end}] {speaker}: {seg.text.strip()}"
 
 
 def _build_transcript(segments: list[TranscriptSegment]) -> str:
-    lines: list[str] = []
-    for seg in segments:
-        speaker = seg.speaker or "Desconhecido"
-        ts = _fmt_mm_ss(seg.start)
-        lines.append(f"[{ts}] {speaker}: {seg.text.strip()}")
-    return "\n".join(lines)
+    return "\n".join(_render_segment(seg) for seg in segments)
 
 
-def _maybe_truncate(text: str) -> str:
-    if len(text) <= _MAX_TRANSCRIPT_CHARS:
-        return text
-    aviso = (
-        f"\n\n[... TRANSCRIPT TRUNCADO: {len(text):,} caracteres no total. "
-        f"Exibindo início e fim ({_TRUNCATE_EACH_SIDE:,} chars cada) ...]\n\n"
-    )
-    warnings.warn(
-        f"Transcript truncado de {len(text)} para ~{2 * _TRUNCATE_EACH_SIDE} caracteres.",
-        stacklevel=4,
-    )
-    return text[:_TRUNCATE_EACH_SIDE] + aviso + text[-_TRUNCATE_EACH_SIDE:]
+@dataclass(frozen=True)
+class TranscriptChunk:
+    index: int
+    start: float
+    end: float
+    text: str
+
+
+def _split_transcript(
+    segments: list[TranscriptSegment],
+    *,
+    max_chars: int = _CHUNK_TRANSCRIPT_CHARS,
+    overlap_chars: int = _CHUNK_OVERLAP_CHARS,
+) -> list[TranscriptChunk]:
+    """Divide em turnos inteiros; overlap repete contexto sem perder segmentos."""
+    if max_chars <= 0:
+        raise ValueError("max_chars deve ser positivo")
+    if overlap_chars < 0 or overlap_chars >= max_chars:
+        raise ValueError("overlap_chars deve estar entre 0 e max_chars")
+    if not segments:
+        return []
+
+    rendered = [_render_segment(seg) for seg in segments]
+    chunks: list[TranscriptChunk] = []
+    start_index = 0
+    while start_index < len(segments):
+        end_index = start_index
+        size = 0
+        while end_index < len(segments):
+            addition = len(rendered[end_index]) + (1 if end_index > start_index else 0)
+            if end_index > start_index and size + addition > max_chars:
+                break
+            size += addition
+            end_index += 1
+
+        chunks.append(
+            TranscriptChunk(
+                index=len(chunks),
+                start=segments[start_index].start,
+                end=segments[end_index - 1].end,
+                text="\n".join(rendered[start_index:end_index]),
+            )
+        )
+        if end_index >= len(segments):
+            break
+
+        overlap_start = end_index
+        overlap_size = 0
+        while overlap_start > start_index + 1:
+            candidate = overlap_start - 1
+            addition = len(rendered[candidate]) + (1 if overlap_size else 0)
+            if overlap_size + addition > overlap_chars:
+                break
+            overlap_size += addition
+            overlap_start = candidate
+        start_index = overlap_start
+
+    return chunks
 
 
 def _parse_json_response(text: str) -> dict:
@@ -315,8 +435,6 @@ def _parse_json_response(text: str) -> dict:
             pass
 
     raise ValueError(text)
-
-
 def _action_item_is_for_owner(d: dict) -> bool:
     """Mantém tarefas do dono ou sem responsável; exclui terceiros explícitos."""
     assigned_to = d.get("assigned_to")
@@ -354,6 +472,121 @@ def _action_item_from_dict(d: dict) -> ActionItem:
     )
 
 
+def _complete_json(provider: LLMProvider, system: str, user: str) -> dict:
+    response = provider.complete(system, user)
+    try:
+        return _parse_json_response(response)
+    except ValueError:
+        raise ValueError(response) from None
+
+
+def _item_key(item: dict) -> tuple[str, str]:
+    def normalize(value: object) -> str:
+        if not isinstance(value, str):
+            return ""
+        return " ".join(value.casefold().split())
+
+    return normalize(item.get("what")), normalize(item.get("where"))
+
+
+def _deduplicate_action_items(items: list[dict]) -> list[dict]:
+    """Une duplicatas exatas sem perder detalhes, urgência ou intervalo de origem."""
+    result: list[dict] = []
+    positions: dict[tuple[str, str], int] = {}
+    priority_rank = {"baixa": 0, "media": 1, "alta": 2}
+
+    for item in items:
+        key = _item_key(item)
+        if not key[0] or key not in positions:
+            positions[key] = len(result)
+            result.append(dict(item))
+            continue
+
+        existing = result[positions[key]]
+        for field in ("requested_by", "assigned_to"):
+            if not existing.get(field) and item.get(field):
+                existing[field] = item[field]
+
+        existing_details = existing.get("details")
+        new_details = item.get("details")
+        if not existing_details and new_details:
+            existing["details"] = new_details
+        elif (
+            isinstance(existing_details, str)
+            and isinstance(new_details, str)
+            and existing_details.casefold().strip() != new_details.casefold().strip()
+        ):
+            existing["details"] = f"{existing_details.strip()}\n{new_details.strip()}"
+
+        existing_priority = existing.get("priority")
+        new_priority = item.get("priority")
+        if priority_rank.get(new_priority, -1) > priority_rank.get(existing_priority, -1):
+            existing["priority"] = new_priority
+
+        new_start = item.get("source_start")
+        if new_start and (
+            not existing.get("source_start") or new_start < existing["source_start"]
+        ):
+            existing["source_start"] = new_start
+        new_end = item.get("source_end")
+        if new_end and (
+            not existing.get("source_end") or new_end > existing["source_end"]
+        ):
+            existing["source_end"] = new_end
+
+    return result
+
+
+def _analyse_chunks(
+    provider: LLMProvider,
+    segments: list[TranscriptSegment],
+    participants: list[str],
+) -> dict:
+    chunks = _split_transcript(segments)
+    analyses: list[dict] = []
+    participants_text = ", ".join(participants) if participants else "não identificados"
+    for chunk in chunks:
+        user = (
+            f"BLOCO {chunk.index + 1}/{len(chunks)} · intervalo absoluto "
+            f"{_fmt_timestamp(chunk.start)}-{_fmt_timestamp(chunk.end)}\n"
+            f"Participantes identificados: {participants_text}\n\n{chunk.text}"
+        )
+        analyses.append(
+            {
+                "chunk_index": chunk.index + 1,
+                "source_start": _fmt_timestamp(chunk.start),
+                "source_end": _fmt_timestamp(chunk.end),
+                "analysis": _complete_json(provider, _CHUNK_SYSTEM_PROMPT, user),
+            }
+        )
+
+    system = _CONSOLIDATE_SYSTEM_PROMPT.replace(
+        "__PARTICIPANTS__", participants_text
+    )
+    payload = json.dumps(
+        {"chunk_count": len(analyses), "chunks": analyses},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return _complete_json(provider, system, payload)
+
+
+def _result_from_data(data: dict) -> tuple[str, list[ActionItem], str]:
+    summary: str = data.get("summary") or ""
+    title: str = data.get("title") or ""
+    items_raw = data.get("action_items") or []
+    personal_items = [
+        item
+        for item in items_raw
+        if isinstance(item, dict) and _action_item_is_for_owner(item)
+    ]
+    action_items = [
+        _action_item_from_dict(item)
+        for item in _deduplicate_action_items(personal_items)
+    ]
+    return summary, action_items, title
+
+
 # ---------------------------------------------------------------------------
 # API pública
 # ---------------------------------------------------------------------------
@@ -364,33 +597,15 @@ def extract(
     participants: list[str],
     settings: Settings,
 ) -> tuple[str, list[ActionItem], str]:
-    """Chama o LLM para extrair resumo, action items e título sugerido.
-
-    Retorna: (summary, action_items, suggested_title).
-    Levanta ValueError com o texto bruto se o parse JSON falhar.
-    """
+    """Extrai reunião curta em uma chamada; reunião longa via map-reduce temporal."""
     provider = get_provider(settings)
+    transcript = _build_transcript(segments)
 
-    raw_transcript = _build_transcript(segments)
-    transcript = _maybe_truncate(raw_transcript)
+    if len(transcript) <= _MAX_TRANSCRIPT_CHARS:
+        part_str = ", ".join(participants) if participants else "não identificados"
+        system = _SYSTEM_PROMPT.replace("__PARTICIPANTS__", part_str)
+        data = _complete_json(provider, system, transcript)
+    else:
+        data = _analyse_chunks(provider, segments, participants)
 
-    part_str = ", ".join(participants) if participants else "não identificados"
-    system = _SYSTEM_PROMPT.replace("__PARTICIPANTS__", part_str)
-
-    response = provider.complete(system, transcript)
-
-    try:
-        data = _parse_json_response(response)
-    except ValueError:
-        raise ValueError(response)
-
-    summary: str = data.get("summary") or ""
-    title: str = data.get("title") or ""
-    items_raw = data.get("action_items") or []
-    action_items = [
-        _action_item_from_dict(item)
-        for item in items_raw
-        if isinstance(item, dict) and _action_item_is_for_owner(item)
-    ]
-
-    return summary, action_items, title
+    return _result_from_data(data)

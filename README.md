@@ -24,6 +24,12 @@ gravação (OBS) ──> wav 16k ──> transcrição + diarização ──> LL
   somente a terceiros são excluídas. Quem pediu (`requested_by`) não é
   confundido com quem executará. A mesma regra vale ao processar, reprocessar ou
   reextrair uma reunião. **Jobs internos:** `process`, `reprocess`, `reextract`.
+- Em reuniões longas, nenhum trecho intermediário é descartado para caber no
+  contexto da LLM. O transcript é analisado em blocos temporais sobrepostos e
+  depois consolidado em ordem; decisões, requisitos, correções posteriores e
+  tarefas discutidas no meio da conversa participam do resultado final. A
+  reunião curta mantém a análise em uma única chamada. **Jobs internos:**
+  `process`, `reprocess`, `reextract`; **integração externa:** LLM configurada.
 - Quando o LLM está habilitado, suas credenciais são validadas antes das etapas
   caras. Sessão Claude expirada/revogada encerra o job imediatamente e orienta
   reconexão em Configurações, evitando perder minutos transcrevendo antes da

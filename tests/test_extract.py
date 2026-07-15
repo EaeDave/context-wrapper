@@ -1,32 +1,19 @@
-"""Tests for meet.extract — JSON parsing, truncation, action item defaults,
-and the public extract() entrypoint via a monkeypatched provider.
-
-Contracts defended:
-- _parse_json_response: parses bare JSON, fenced ```json, JSON with surrounding
-  garbage, and raises ValueError on unparseable input.
-- _action_item_from_dict: absent keys yield correct defaults.
-- _maybe_truncate: text ≤ 100 000 chars returned intact (including the exact
-  boundary); longer text keeps the first and last 40 000 chars.
-- extract(): calls the provider, parses response, returns (summary, items, title).
-- get_provider(): raises ValueError with a human-readable message when api_key
-  is absent; raises ValueError for unknown provider names.
-"""
+"""Contratos da extração LLM: parsing, responsabilidade e reuniões longas."""
 
 from __future__ import annotations
 
-import warnings
+import json
 
 import pytest
 
 import meet.extract as extract_mod
 from meet.config import Settings
 from meet.extract import (
-    _MAX_TRANSCRIPT_CHARS,
-    _TRUNCATE_EACH_SIDE,
     _action_item_from_dict,
     _action_item_is_for_owner,
-    _maybe_truncate,
+    _deduplicate_action_items,
     _parse_json_response,
+    _split_transcript,
     extract,
     get_provider,
     validate_credentials,
@@ -152,65 +139,88 @@ def test_action_item_filtra_responsavel_explicito(
     assert _action_item_is_for_owner({"assigned_to": assigned_to}) is expected
 
 
+def test_deduplicate_preserva_detalhes_prioridade_e_intervalo() -> None:
+    items = [
+        {
+            "what": "Atualizar endpoint",
+            "where": "/api/orders",
+            "details": "Aceitar external_id",
+            "priority": "media",
+            "source_start": "00:42:00",
+            "source_end": "00:42:20",
+        },
+        {
+            "what": " atualizar endpoint ",
+            "where": "/API/orders",
+            "details": "Manter compatibilidade por 30 dias",
+            "requested_by": "Alice",
+            "assigned_to": "me",
+            "priority": "alta",
+            "source_start": "00:41:50",
+            "source_end": "00:42:45",
+        },
+    ]
+
+    assert _deduplicate_action_items(items) == [
+        {
+            "what": "Atualizar endpoint",
+            "where": "/api/orders",
+            "details": "Aceitar external_id\nManter compatibilidade por 30 dias",
+            "requested_by": "Alice",
+            "assigned_to": "me",
+            "priority": "alta",
+            "source_start": "00:41:50",
+            "source_end": "00:42:45",
+        }
+    ]
+
+
 # ---------------------------------------------------------------------------
-# _maybe_truncate
+# Chunking temporal
 # ---------------------------------------------------------------------------
 
-def test_maybe_truncate_short_text_intact() -> None:
-    """Text well below the limit is returned without modification."""
-    text = "a" * 1000
-    assert _maybe_truncate(text) is text  # same object — no copy
+
+def _long_segments(count: int = 12, chars: int = 30) -> list[TranscriptSegment]:
+    return [
+        TranscriptSegment(
+            start=float(i * 60),
+            end=float(i * 60 + 45),
+            text=f"marcador-{i:02d} " + (chr(65 + i % 26) * chars),
+            speaker="me" if i % 2 == 0 else "Alice",
+        )
+        for i in range(count)
+    ]
 
 
-def test_maybe_truncate_exactly_at_limit_intact() -> None:
-    """Text at exactly the limit (100 000 chars) must NOT be truncated."""
-    text = "x" * _MAX_TRANSCRIPT_CHARS
-    result = _maybe_truncate(text)
-    assert result == text
+def test_split_transcript_cobre_todos_os_segmentos_sem_cortar_turnos() -> None:
+    segments = _long_segments()
+    chunks = _split_transcript(segments, max_chars=180, overlap_chars=50)
+
+    combined = "\n".join(chunk.text for chunk in chunks)
+    assert len(chunks) > 1
+    for i in range(len(segments)):
+        assert f"marcador-{i:02d}" in combined
+    assert all(chunk.text.startswith("[") for chunk in chunks)
+    assert all("marcador-" in line for chunk in chunks for line in chunk.text.splitlines())
 
 
-def test_maybe_truncate_long_preserves_start() -> None:
-    """Truncated output starts with the first 40 000 chars of the original."""
-    prefix = "A" * _TRUNCATE_EACH_SIDE
-    middle = "M" * (_MAX_TRANSCRIPT_CHARS - 2 * _TRUNCATE_EACH_SIDE + 1)
-    suffix = "Z" * _TRUNCATE_EACH_SIDE
-    text = prefix + middle + suffix  # total > _MAX_TRANSCRIPT_CHARS
+def test_split_transcript_tem_overlap_e_timestamps_absolutos() -> None:
+    chunks = _split_transcript(_long_segments(), max_chars=180, overlap_chars=80)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        result = _maybe_truncate(text)
-
-    assert result.startswith("A" * _TRUNCATE_EACH_SIDE)
+    adjacent_overlap = [
+        set(left.text.splitlines()) & set(right.text.splitlines())
+        for left, right in zip(chunks, chunks[1:])
+    ]
+    assert all(overlap for overlap in adjacent_overlap)
+    assert "[00:00:00-00:00:45]" in chunks[0].text
+    assert "[00:11:00-00:11:45]" in chunks[-1].text
 
 
-def test_maybe_truncate_long_preserves_end() -> None:
-    """Truncated output ends with the last 40 000 chars of the original."""
-    prefix = "A" * _TRUNCATE_EACH_SIDE
-    middle = "M" * (_MAX_TRANSCRIPT_CHARS - 2 * _TRUNCATE_EACH_SIDE + 1)
-    suffix = "Z" * _TRUNCATE_EACH_SIDE
-    text = prefix + middle + suffix
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        result = _maybe_truncate(text)
-
-    assert result.endswith("Z" * _TRUNCATE_EACH_SIDE)
-
-
-def test_maybe_truncate_long_emits_warning() -> None:
-    """Truncation must emit a UserWarning."""
-    text = "x" * (_MAX_TRANSCRIPT_CHARS + 1)
-    with pytest.warns(UserWarning, match="Transcript truncado"):
-        _maybe_truncate(text)
-
-
-def test_maybe_truncate_long_contains_truncation_notice() -> None:
-    """The ellipsis marker inserted between the halves must mention the length."""
-    text = "a" * (_MAX_TRANSCRIPT_CHARS + 500)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        result = _maybe_truncate(text)
-    assert "TRUNCADO" in result
+def test_split_transcript_valida_limites() -> None:
+    with pytest.raises(ValueError):
+        _split_transcript(_long_segments(), max_chars=0)
+    with pytest.raises(ValueError):
+        _split_transcript(_long_segments(), max_chars=100, overlap_chars=100)
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +302,92 @@ def test_extract_mantem_so_tarefas_do_dono_ou_sem_dono(
     assert items[0].requested_by == "Alice"
 
 
+def test_extract_longo_analisa_todos_blocos_e_consolida(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class MapReduceProvider(LLMProvider):
+        def complete(self, system: str, user: str) -> str:
+            calls.append((system, user))
+            if "UM BLOCO temporal" in system:
+                first_timestamp = user.split("[", 1)[1].split("]", 1)[0]
+                return json.dumps(
+                    {
+                        "chunk_summary": f"Síntese {first_timestamp}",
+                        "decisions": [
+                            {
+                                "what": f"Decisão {first_timestamp}",
+                                "source_start": first_timestamp.split("-", 1)[0],
+                                "source_end": first_timestamp.split("-", 1)[1],
+                            }
+                        ],
+                        "requirements": [
+                            {
+                                "what": f"Requisito {first_timestamp}",
+                                "source_start": first_timestamp.split("-", 1)[0],
+                                "source_end": first_timestamp.split("-", 1)[1],
+                            }
+                        ],
+                        "action_items": [],
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {
+                    "title": "Reunião longa",
+                    "summary": "Resumo consolidado com decisões e requisitos.",
+                    "action_items": [
+                        {
+                            "what": "Atualizar /api/orders",
+                            "where": "/api/orders",
+                            "assigned_to": "me",
+                            "source_start": "00:42:00",
+                            "source_end": "00:42:45",
+                        },
+                        {
+                            "what": " atualizar /API/orders ",
+                            "where": "/API/orders",
+                            "assigned_to": "me",
+                            "details": "Preservar paginação",
+                        },
+                        {"what": "Alice migra o banco", "assigned_to": "Alice"},
+                        {"what": "Definir responsável pelo rollout", "assigned_to": None},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+    segments = _long_segments(count=130, chars=900)
+    provider = MapReduceProvider()
+    monkeypatch.setattr(extract_mod, "get_provider", lambda _: provider)
+
+    summary, items, title = extract(segments, ["me", "Alice"], _settings())
+
+    chunk_calls = [(system, user) for system, user in calls if "UM BLOCO" in system]
+    assert len(_build_call_text := "\n".join(user for _, user in chunk_calls)) > 0
+    assert len(chunk_calls) > 1
+    assert len(calls) == len(chunk_calls) + 1
+    assert "marcador-00" in _build_call_text
+    assert "marcador-65" in _build_call_text
+    assert "marcador-129" in _build_call_text
+
+    consolidation = json.loads(calls[-1][1])
+    assert consolidation["chunk_count"] == len(chunk_calls)
+    assert all(chunk["analysis"]["decisions"] for chunk in consolidation["chunks"])
+    assert all(chunk["analysis"]["requirements"] for chunk in consolidation["chunks"])
+    assert consolidation["chunks"][0]["source_start"] == "00:00:00"
+    assert consolidation["chunks"][-1]["source_end"] == "02:09:45"
+
+    assert title == "Reunião longa"
+    assert "decisões e requisitos" in summary
+    assert [item.what.strip() for item in items] == [
+        "Atualizar /api/orders",
+        "Definir responsável pelo rollout",
+    ]
+    assert items[0].details == "Preservar paginação"
+
+
 def test_extract_explica_identidade_e_atribuicao_ao_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -313,8 +409,8 @@ def test_extract_explica_identidade_e_atribuicao_ao_provider(
     assert 'label literal "me" é o dono destas notas' in captured["system"]
     assert "NÃO inclua tarefa atribuída explicitamente" in captured["system"]
     assert '"requested_by" é quem pediu a tarefa' in captured["system"]
-    assert "[00:00] me: Eu faço o deploy" in captured["user"]
-    assert "[00:01] Alice: Eu corrijo o login" in captured["user"]
+    assert "[00:00:00-00:00:01] me: Eu faço o deploy" in captured["user"]
+    assert "[00:00:01-00:00:02] Alice: Eu corrijo o login" in captured["user"]
 
 def test_extract_raises_on_bad_provider_response(monkeypatch: pytest.MonkeyPatch) -> None:
     """extract() re-raises ValueError when the provider returns unparseable text."""
