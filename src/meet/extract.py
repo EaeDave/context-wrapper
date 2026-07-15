@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .config import Settings
@@ -14,6 +15,7 @@ from .models import ActionItem, TranscriptSegment
 _MAX_TRANSCRIPT_CHARS = 100_000
 _CHUNK_TRANSCRIPT_CHARS = 40_000
 _CHUNK_OVERLAP_CHARS = 4_000
+ExtractionProgressCallback = Callable[[float | None, str], None]
 
 # Prompt do sistema em PT-BR — usa __PARTICIPANTS__ como placeholder.
 _SYSTEM_PROMPT = """\
@@ -541,25 +543,41 @@ def _analyse_chunks(
     provider: LLMProvider,
     segments: list[TranscriptSegment],
     participants: list[str],
+    on_progress: ExtractionProgressCallback | None = None,
 ) -> dict:
     chunks = _split_transcript(segments)
     analyses: list[dict] = []
     participants_text = ", ".join(participants) if participants else "não identificados"
+    operation_count = len(chunks) + 1  # blocos + consolidação final
+
     for chunk in chunks:
+        block_number = chunk.index + 1
+        if on_progress is not None:
+            on_progress(
+                chunk.index / operation_count,
+                f"Analisando bloco {block_number} de {len(chunks)}",
+            )
         user = (
-            f"BLOCO {chunk.index + 1}/{len(chunks)} · intervalo absoluto "
+            f"BLOCO {block_number}/{len(chunks)} · intervalo absoluto "
             f"{_fmt_timestamp(chunk.start)}-{_fmt_timestamp(chunk.end)}\n"
             f"Participantes identificados: {participants_text}\n\n{chunk.text}"
         )
         analyses.append(
             {
-                "chunk_index": chunk.index + 1,
+                "chunk_index": block_number,
                 "source_start": _fmt_timestamp(chunk.start),
                 "source_end": _fmt_timestamp(chunk.end),
                 "analysis": _complete_json(provider, _CHUNK_SYSTEM_PROMPT, user),
             }
         )
+        if on_progress is not None:
+            on_progress(
+                block_number / operation_count,
+                f"Bloco {block_number} de {len(chunks)} analisado",
+            )
 
+    if on_progress is not None:
+        on_progress(None, "Consolidando análises dos blocos")
     system = _CONSOLIDATE_SYSTEM_PROMPT.replace(
         "__PARTICIPANTS__", participants_text
     )
@@ -568,7 +586,10 @@ def _analyse_chunks(
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    return _complete_json(provider, system, payload)
+    data = _complete_json(provider, system, payload)
+    if on_progress is not None:
+        on_progress(1.0, "Resumo e tarefas consolidados")
+    return data
 
 
 def _result_from_data(data: dict) -> tuple[str, list[ActionItem], str]:
@@ -596,16 +617,21 @@ def extract(
     segments: list[TranscriptSegment],
     participants: list[str],
     settings: Settings,
+    on_progress: ExtractionProgressCallback | None = None,
 ) -> tuple[str, list[ActionItem], str]:
     """Extrai reunião curta em uma chamada; reunião longa via map-reduce temporal."""
     provider = get_provider(settings)
     transcript = _build_transcript(segments)
 
     if len(transcript) <= _MAX_TRANSCRIPT_CHARS:
+        if on_progress is not None:
+            on_progress(None, "Gerando resumo e tarefas com LLM")
         part_str = ", ".join(participants) if participants else "não identificados"
         system = _SYSTEM_PROMPT.replace("__PARTICIPANTS__", part_str)
         data = _complete_json(provider, system, transcript)
+        if on_progress is not None:
+            on_progress(1.0, "Resumo e tarefas gerados")
     else:
-        data = _analyse_chunks(provider, segments, participants)
+        data = _analyse_chunks(provider, segments, participants, on_progress)
 
     return _result_from_data(data)

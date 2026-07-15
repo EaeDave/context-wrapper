@@ -43,11 +43,13 @@ gravação (OBS) ──> wav 16k ──> transcrição + diarização ──> LL
   `/api/jobs` e `/api/jobs/{id}/events`.
 - Durante o processamento, a interface mostra porcentagem geral ponderada,
   etapa atual, tempo total e tempo medido de cada etapa. Preparação de áudio,
-  transcrição, diarização e importação usam avanço observado; chamadas sem
-  granularidade confiável, como a extração LLM, aparecem como indeterminadas em
-  vez de inventar uma estimativa. Progresso e tempos são persistidos e
-  transmitidos em tempo real. **Endpoints internos:** `/api/jobs` e
-  `/api/jobs/{id}/events`.
+  transcrição, diarização e importação usam avanço observado. Em reuniões
+  longas, a extração LLM mostra `Analisando bloco N de M` e avança quando cada
+  bloco termina; a consolidação final aparece separadamente como indeterminada.
+  Reuniões curtas continuam indeterminadas durante sua chamada LLM única, sem
+  inventar ETA. Progresso e tempos são persistidos e transmitidos em tempo real.
+  **Jobs internos:** `process`, `reprocess`, `reextract`; **endpoints internos:**
+  `/api/jobs` e `/api/jobs/{id}/events`.
 - Falantes desconhecidos ficam como `SPEAKER_XX`. Ao nomeá-los, a voz pode ser
   reconhecida automaticamente em reuniões futuras conforme o limiar de
   similaridade configurado. **Endpoint interno:** `/api/meetings/{id}/assign`.

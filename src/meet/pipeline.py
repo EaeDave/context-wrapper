@@ -253,7 +253,10 @@ def _analyse(
 
         try:
             summary, action_items, suggested_title = extract_mod.extract(
-                segments, participants, settings
+                segments,
+                participants,
+                settings,
+                on_progress=tracker.update,
             )
         except Exception as exc:
             raise RuntimeError(f"Erro na extração LLM: {exc}") from exc
@@ -431,7 +434,10 @@ def reextract_meeting(
     tracker.start("llm", "Gerando resumo e tarefas com LLM", determinate=False)
     try:
         summary, action_items, _suggested_title = extract_mod.extract(
-            existing.segments, existing.participants, settings
+            existing.segments,
+            existing.participants,
+            settings,
+            on_progress=tracker.update,
         )
     except Exception as exc:
         raise RuntimeError(f"Erro na extração LLM: {exc}") from exc

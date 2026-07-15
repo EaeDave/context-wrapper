@@ -254,11 +254,16 @@ def _settings() -> Settings:
     return Settings(llm_provider="anthropic", anthropic_api_key="fake-key")
 
 
-def test_extract_returns_summary_title_items(monkeypatch: pytest.MonkeyPatch) -> None:
-    """extract() calls provider and returns parsed (summary, items, title)."""
+def test_extract_curto_emite_progresso_indeterminado_e_conclusao(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(extract_mod, "get_provider", lambda _: _FakeProvider(_GOOD_RESPONSE))
     segs = [TranscriptSegment(start=0, end=5, text="Olá pessoal", speaker="Alice")]
-    summary, items, title = extract(segs, ["Alice"], _settings())
+    progress: list[tuple[float | None, str]] = []
+
+    summary, items, title = extract(
+        segs, ["Alice"], _settings(), on_progress=lambda value, detail: progress.append((value, detail))
+    )
 
     assert title == "Sprint Planning"
     assert "prioridades" in summary
@@ -266,6 +271,10 @@ def test_extract_returns_summary_title_items(monkeypatch: pytest.MonkeyPatch) ->
     assert items[0].what == "Corrigir login"
     assert items[0].priority == "alta"
     assert items[0].where == "/auth"
+    assert progress == [
+        (None, "Gerando resumo e tarefas com LLM"),
+        (1.0, "Resumo e tarefas gerados"),
+    ]
 
 
 def test_extract_item_missing_fields_get_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -361,8 +370,14 @@ def test_extract_longo_analisa_todos_blocos_e_consolida(
     segments = _long_segments(count=130, chars=900)
     provider = MapReduceProvider()
     monkeypatch.setattr(extract_mod, "get_provider", lambda _: provider)
+    progress: list[tuple[float | None, str]] = []
 
-    summary, items, title = extract(segments, ["me", "Alice"], _settings())
+    summary, items, title = extract(
+        segments,
+        ["me", "Alice"],
+        _settings(),
+        on_progress=lambda value, detail: progress.append((value, detail)),
+    )
 
     chunk_calls = [(system, user) for system, user in calls if "UM BLOCO" in system]
     assert len(_build_call_text := "\n".join(user for _, user in chunk_calls)) > 0
@@ -386,6 +401,20 @@ def test_extract_longo_analisa_todos_blocos_e_consolida(
         "Definir responsável pelo rollout",
     ]
     assert items[0].details == "Preservar paginação"
+
+    block_count = len(chunk_calls)
+    assert progress[0] == (0.0, f"Analisando bloco 1 de {block_count}")
+    assert progress[-3] == (
+        block_count / (block_count + 1),
+        f"Bloco {block_count} de {block_count} analisado",
+    )
+    assert progress[-2] == (None, "Consolidando análises dos blocos")
+    assert progress[-1] == (1.0, "Resumo e tarefas consolidados")
+    measured = [value for value, _detail in progress if value is not None]
+    assert measured == sorted(measured)
+    assert [
+        detail for _value, detail in progress if detail.startswith("Analisando bloco")
+    ] == [f"Analisando bloco {i} de {block_count}" for i in range(1, block_count + 1)]
 
 
 def test_extract_explica_identidade_e_atribuicao_ao_provider(
@@ -531,6 +560,128 @@ def test_pipeline_valida_llm_antes_do_audio(
     assert updates[-1].step == "auth"
     assert updates[-1].detail == "Validando acesso ao LLM"
     assert audio_called is False
+
+
+def test_analyse_propaga_callback_da_extracao_ao_tracker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from types import SimpleNamespace
+
+    from meet import audio as audio_mod
+    from meet import diarize as diarize_mod
+    from meet import merge as merge_mod
+    from meet import transcribe as transcribe_mod
+    from meet import voicebank as voicebank_mod
+    from meet.pipeline import _analyse
+    from meet.progress import ProgressTracker, StepSpec
+
+    monkeypatch.setattr(extract_mod, "validate_credentials", lambda _settings: None)
+    monkeypatch.setattr(
+        audio_mod,
+        "prepare",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            mic=None,
+            others=tmp_path / "others.wav",
+            mixed=tmp_path / "mixed.wav",
+            duration=60.0,
+        ),
+    )
+    segments = [TranscriptSegment(0, 1, "Tarefa", speaker="me")]
+    monkeypatch.setattr(transcribe_mod, "transcribe", lambda *_args, **_kwargs: segments)
+    monkeypatch.setattr(diarize_mod, "diarize", lambda *_args, **_kwargs: ([], {}))
+    monkeypatch.setattr(merge_mod, "assign_speakers", lambda current, _turns: current)
+    monkeypatch.setattr(merge_mod, "rename_speakers", lambda current, _mapping: current)
+    monkeypatch.setattr(voicebank_mod, "resolve_with_scores", lambda *_args: {})
+
+    def fake_extract(_segments, _participants, _settings, on_progress=None):
+        assert on_progress is not None
+        on_progress(0.5, "Analisando bloco 2 de 4")
+        on_progress(None, "Consolidando análises dos blocos")
+        on_progress(1.0, "Resumo e tarefas consolidados")
+        return "Resumo", [], "Título"
+
+    monkeypatch.setattr(extract_mod, "extract", fake_extract)
+    updates = []
+    tracker = ProgressTracker(
+        (
+            StepSpec("auth", "Autenticar", 1.0),
+            StepSpec("audio", "Áudio", 1.0),
+            StepSpec("transcribe", "Transcrever", 1.0),
+            StepSpec("diarize", "Diarizar", 1.0),
+            StepSpec("speakers", "Vozes", 1.0),
+            StepSpec("llm", "LLM", 1.0),
+        ),
+        updates.append,
+    )
+
+    _analyse(
+        video=tmp_path / "reuniao.mkv",
+        mic_track=1,
+        others_track=2,
+        no_llm=False,
+        settings=_settings(),
+        store=object(),  # type: ignore[arg-type]
+        workdir=tmp_path,
+        today="2026-07-14",
+        tracker=tracker,
+    )
+
+    llm_updates = [update for update in updates if update.step == "llm"]
+    assert [(update.step_percent, update.detail) for update in llm_updates[-3:]] == [
+        (50.0, "Analisando bloco 2 de 4"),
+        (None, "Consolidando análises dos blocos"),
+        (100.0, "Resumo e tarefas consolidados"),
+    ]
+
+
+def test_reextract_propaga_progresso_estruturado(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_store,
+    tmp_path,
+) -> None:
+    from meet.models import MeetingResult
+    from meet.pipeline import reextract_meeting
+
+    settings = Settings(data_dir=tmp_path, output_dir=tmp_path)
+    meeting_id = tmp_store.save_meeting(
+        MeetingResult(
+            source=str(tmp_path / "reuniao.mkv"),
+            date="2026-07-14",
+            title="Reunião longa",
+            duration=7200.0,
+            participants=["me", "Alice"],
+            segments=[TranscriptSegment(0, 1, "Tarefa", speaker="me")],
+        ),
+        tmp_path / "reuniao.md",
+    )
+    monkeypatch.setattr(extract_mod, "validate_credentials", lambda _settings: None)
+
+    def fake_extract(_segments, _participants, _settings, on_progress=None):
+        assert on_progress is not None
+        on_progress(0.25, "Bloco 1 de 3 analisado")
+        on_progress(None, "Consolidando análises dos blocos")
+        on_progress(1.0, "Resumo e tarefas consolidados")
+        return "Resumo novo", [], "Título ignorado"
+
+    monkeypatch.setattr(extract_mod, "extract", fake_extract)
+    updates = []
+
+    reextract_meeting(
+        meeting_id,
+        settings=settings,
+        store=tmp_store,
+        on_progress=updates.append,
+    )
+
+    llm_updates = [update for update in updates if update.step == "llm"]
+    assert [(update.step_percent, update.detail) for update in llm_updates[-3:]] == [
+        (25.0, "Bloco 1 de 3 analisado"),
+        (None, "Consolidando análises dos blocos"),
+        (100.0, "Resumo e tarefas consolidados"),
+    ]
+    assert updates[-1].percent == 100.0
+    assert tmp_store.get_meeting(meeting_id).summary == "Resumo novo"
 
 
 # ---------------------------------------------------------------------------

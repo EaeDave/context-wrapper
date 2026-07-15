@@ -22,5 +22,5 @@
 
 - Validate LLM credentials before audio/model work so auth failures do not waste a long transcription run.
 - OAuth refresh is serialized inside the server process and credentials are re-read after acquiring the lock to avoid consuming one rotating token twice.
-- Progress is hybrid by design: report observed work inside measurable stages and keep blocking operations indeterminate rather than deriving an ETA from historical guesses.
+- Progress is hybrid by design: report observed work inside measurable stages (including completed LLM blocks) and keep blocking operations such as a single LLM call or final consolidation indeterminate rather than deriving an ETA from historical guesses.
 <!-- business-readme:context:end -->
