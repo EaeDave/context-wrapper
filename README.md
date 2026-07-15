@@ -18,6 +18,12 @@ gravação (OBS) ──> wav 16k ──> transcrição + diarização ──> LL
   vozes, extrai resumo/action items, salva o resultado e, por padrão, importa a
   mídia. A opção “Sem LLM” mantém transcrição e diarização, sem resumo nem
   action items. **Job interno:** `process`; **endpoint interno:** `POST /api/process`.
+- Action items formam uma lista pessoal do usuário. A LLM mantém tarefas
+  atribuídas a `me`, tarefas compartilhadas que incluam `me` e tarefas cujo
+  responsável realmente ficou indefinido; tarefas explicitamente atribuídas
+  somente a terceiros são excluídas. Quem pediu (`requested_by`) não é
+  confundido com quem executará. A mesma regra vale ao processar, reprocessar ou
+  reextrair uma reunião. **Jobs internos:** `process`, `reprocess`, `reextract`.
 - Quando o LLM está habilitado, suas credenciais são validadas antes das etapas
   caras. Sessão Claude expirada/revogada encerra o job imediatamente e orienta
   reconexão em Configurações, evitando perder minutos transcrevendo antes da

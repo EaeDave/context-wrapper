@@ -5,7 +5,7 @@
 
 ## Current business rule map
 
-- Pipeline and optional LLM behavior → `README.md#regras-do-produto`, `src/meet/pipeline.py`, `tests/test_extract.py`; **job interno:** `process`.
+- Pipeline, extração LLM e responsabilidade pessoal dos action items → `README.md#regras-do-produto`, `src/meet/pipeline.py`, `src/meet/extract.py`, `tests/test_extract.py`; **jobs internos:** `process`, `reprocess`, `reextract`.
 - Job lifecycle, structured progress, and interruption recovery → `README.md#regras-do-produto`, `src/meet/progress.py`, `src/meet/web/jobs.py`, `tests/test_progress.py`, `tests/test_jobs.py`; **endpoints internos:** `/api/jobs/*`.
 - Claude OAuth connection lifecycle → `README.md#regras-do-produto`, `src/meet/anthropic_oauth.py`, `tests/test_settings_local.py`; **endpoints internos:** `/api/auth/anthropic/*`.
 

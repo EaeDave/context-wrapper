@@ -33,14 +33,30 @@ O JSON deve seguir exatamente este schema (sem markdown, sem comentários):
       "where": "<tela, endpoint, módulo, repositório — ou null se não aplicável>",
       "details": "<detalhes técnicos literais mencionados — ou null>",
       "requested_by": "<nome de quem pediu, ou null se não identificado>",
+      "assigned_to": "<me se o dono destas notas participa da execução; nome/label de terceiro; ou null se não há responsável claro>",
       "priority": "<alta | media | baixa>"
     }
   ]
 }
 
 Participantes identificados: __PARTICIPANTS__
-O participante "me" é o dono destas notas — a pessoa que vai executar as tarefas. \
-Os action items normalmente são pedidos POR outros participantes PARA "me".\
+
+REGRA OBRIGATÓRIA DE RESPONSABILIDADE DOS ACTION ITEMS:
+- O participante com label literal "me" é o dono destas notas.
+- A lista é pessoal: inclua somente tarefas atribuídas a "me", tarefas compartilhadas que
+  incluam "me", ou tarefas acionáveis cujo responsável realmente ficou indefinido.
+- NÃO inclua tarefa atribuída explicitamente a outra pessoa ou equipe sem participação de
+  "me". Isso vale mesmo que a tarefa seja importante ou tenha sido discutida em detalhes.
+- Use "assigned_to": "me" quando "me" participa da execução. Use null somente quando o
+  contexto não define responsável. Se identificar responsabilidade exclusiva de terceiro,
+  use seu nome/label para classificar, mas omita esse item de action_items.
+- "requested_by" é quem pediu a tarefa, não quem vai executá-la. Um terceiro pode pedir uma
+  tarefa para "me"; nesse caso ela deve ser incluída.
+- Resolva pronomes pelo falante e pelo contexto: se "me" diz "eu faço", a tarefa é de "me";
+  se outro participante diz "eu faço", a tarefa é desse participante e deve ser omitida;
+  se alguém atribui explicitamente algo a "você" referindo-se a "me", inclua.
+- Se "me" não aparecer no transcript, não invente sua identidade. Ainda omita atribuições
+  inequívocas a terceiros e mantenha como null somente o que de fato ficou sem dono claro.
 """
 
 
@@ -301,6 +317,33 @@ def _parse_json_response(text: str) -> dict:
     raise ValueError(text)
 
 
+def _action_item_is_for_owner(d: dict) -> bool:
+    """Mantém tarefas do dono ou sem responsável; exclui terceiros explícitos."""
+    assigned_to = d.get("assigned_to")
+    if assigned_to is None:
+        return True
+    if isinstance(assigned_to, list):
+        return any(
+            isinstance(owner, str) and owner.strip().casefold() == "me"
+            for owner in assigned_to
+        )
+    if not isinstance(assigned_to, str):
+        return False
+    normalized = assigned_to.strip().casefold()
+    if re.search(r"(?:^|[^\w])me(?:$|[^\w])", normalized):
+        return True
+    return normalized in {
+        "",
+        "null",
+        "none",
+        "não identificado",
+        "nao identificado",
+        "indefinido",
+        "unknown",
+        "unclear",
+    }
+
+
 def _action_item_from_dict(d: dict) -> ActionItem:
     return ActionItem(
         what=d.get("what") or "",
@@ -347,7 +390,7 @@ def extract(
     action_items = [
         _action_item_from_dict(item)
         for item in items_raw
-        if isinstance(item, dict)
+        if isinstance(item, dict) and _action_item_is_for_owner(item)
     ]
 
     return summary, action_items, title

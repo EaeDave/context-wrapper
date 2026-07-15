@@ -24,6 +24,7 @@ from meet.extract import (
     _MAX_TRANSCRIPT_CHARS,
     _TRUNCATE_EACH_SIDE,
     _action_item_from_dict,
+    _action_item_is_for_owner,
     _maybe_truncate,
     _parse_json_response,
     extract,
@@ -126,6 +127,29 @@ def test_action_item_falsy_values_treated_as_missing() -> None:
     assert item.where is None
     assert item.details is None
     assert item.requested_by is None
+
+
+@pytest.mark.parametrize(
+    ("assigned_to", "expected"),
+    [
+        ("me", True),
+        (" ME ", True),
+        (None, True),
+        (["me", "Alice"], True),
+        (["Alice", "Bruno"], False),
+        ("me e Alice", True),
+        (False, False),
+        (0, False),
+        ({"name": "me"}, False),
+        ("indefinido", True),
+        ("Alice", False),
+        ("Equipe de infraestrutura", False),
+    ],
+)
+def test_action_item_filtra_responsavel_explicito(
+    assigned_to: object, expected: bool
+) -> None:
+    assert _action_item_is_for_owner({"assigned_to": assigned_to}) is expected
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +267,54 @@ def test_extract_item_missing_fields_get_defaults(monkeypatch: pytest.MonkeyPatc
     assert items[0].where is None
     assert items[0].priority == "media"
 
+
+
+def test_extract_mantem_so_tarefas_do_dono_ou_sem_dono(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = """{
+      "title": "T", "summary": "S", "action_items": [
+        {"what": "Eu preparo o deploy", "requested_by": "Alice", "assigned_to": "me"},
+        {"what": "Alice corrige o login", "assigned_to": "Alice"},
+        {"what": "Revisar a documentação", "assigned_to": null},
+        {"what": "Compatibilidade antiga sem campo"}
+      ]
+    }"""
+    monkeypatch.setattr(extract_mod, "get_provider", lambda _: _FakeProvider(response))
+
+    _, items, _ = extract([], ["me", "Alice"], _settings())
+
+    assert [item.what for item in items] == [
+        "Eu preparo o deploy",
+        "Revisar a documentação",
+        "Compatibilidade antiga sem campo",
+    ]
+    assert items[0].requested_by == "Alice"
+
+
+def test_extract_explica_identidade_e_atribuicao_ao_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, str] = {}
+
+    class CapturingProvider(LLMProvider):
+        def complete(self, system: str, user: str) -> str:
+            captured.update(system=system, user=user)
+            return '{"title":"T","summary":"S","action_items":[]}'
+
+    monkeypatch.setattr(extract_mod, "get_provider", lambda _: CapturingProvider())
+    segments = [
+        TranscriptSegment(0, 1, "Eu faço o deploy", speaker="me"),
+        TranscriptSegment(1, 2, "Eu corrijo o login", speaker="Alice"),
+    ]
+
+    extract(segments, ["me", "Alice"], _settings())
+
+    assert 'label literal "me" é o dono destas notas' in captured["system"]
+    assert "NÃO inclua tarefa atribuída explicitamente" in captured["system"]
+    assert '"requested_by" é quem pediu a tarefa' in captured["system"]
+    assert "[00:00] me: Eu faço o deploy" in captured["user"]
+    assert "[00:01] Alice: Eu corrijo o login" in captured["user"]
 
 def test_extract_raises_on_bad_provider_response(monkeypatch: pytest.MonkeyPatch) -> None:
     """extract() re-raises ValueError when the provider returns unparseable text."""
