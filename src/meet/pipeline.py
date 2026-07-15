@@ -57,6 +57,7 @@ def run_pipeline(
     today: str | None = None,
     on_progress: ProgressCallback | None = None,
     num_speakers: int = 0,
+    project_id: int | None = None,
 ) -> tuple[int, MeetingResult, Path]:
     """Processa gravação de ponta a ponta com progresso estruturado."""
     if not video.exists():
@@ -81,6 +82,7 @@ def run_pipeline(
             today=today or date.today().isoformat(),
             tracker=tracker,
             num_speakers=num_speakers,
+            project_id=project_id,
         )
     finally:
         if not keep_wav:
@@ -252,7 +254,7 @@ def _analyse(
         from . import extract as extract_mod
 
         try:
-            summary, action_items, suggested_title = extract_mod.extract(
+            summary, action_items, suggested_title, facts = extract_mod.extract(
                 segments,
                 participants,
                 settings,
@@ -270,6 +272,7 @@ def _analyse(
         participants=participants,
         summary=summary,
         action_items=action_items,
+        facts=facts if not no_llm else [],
         segments=segments,
         speaker_matches=speaker_matches,
     )
@@ -307,6 +310,7 @@ def _run(
     today: str,
     tracker: ProgressTracker,
     num_speakers: int = 0,
+    project_id: int | None = None,
 ) -> tuple[int, MeetingResult, Path]:
     from . import render as render_mod
 
@@ -329,7 +333,7 @@ def _run(
     filename = render_mod.meeting_filename(result)
     md_path = settings.output_dir / filename
     md_path.write_text(md_content, encoding="utf-8")
-    meeting_id = store.save_meeting(result, md_path)
+    meeting_id = store.save_meeting(result, md_path, project_id=project_id)
     _save_pending(meeting_id, embeddings, unresolved, settings.data_dir)
     tracker.update(1.0, "Reunião salva")
 
@@ -433,7 +437,7 @@ def reextract_meeting(
 
     tracker.start("llm", "Gerando resumo e tarefas com LLM", determinate=False)
     try:
-        summary, action_items, _suggested_title = extract_mod.extract(
+        summary, action_items, _suggested_title, facts = extract_mod.extract(
             existing.segments,
             existing.participants,
             settings,
@@ -443,6 +447,6 @@ def reextract_meeting(
         raise RuntimeError(f"Erro na extração LLM: {exc}") from exc
 
     tracker.start("save", "Salvando resultado no banco")
-    store.update_meeting_extract(meeting_id, summary, action_items, None)
+    store.update_meeting_extract(meeting_id, summary, action_items, None, facts)
     store._regen_md(meeting_id)
     tracker.finish(f"Re-extração concluída — reunião #{meeting_id}")

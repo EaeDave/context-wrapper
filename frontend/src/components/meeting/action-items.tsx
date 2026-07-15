@@ -1,10 +1,11 @@
 import { useState } from "react"
-import { ClipboardList, Copy, Pencil, Plus, Trash2 } from "lucide-react"
+import { ClipboardList, Copy, Pencil, Plus, Trash2, Clock } from "lucide-react"
 import { useQueryClient, useMutation } from "@tanstack/react-query"
 import { toast } from "sonner"
 import type { ActionItem, MeetingDetail } from "@/lib/types"
 import * as api from "@/lib/api"
 import { copyToClipboard } from "@/lib/utils"
+import { formatTs } from "@/lib/format"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -51,17 +52,19 @@ const PRIORITY_VARIANT = {
   baixa: "secondary",
 } as const satisfies Record<ActionItem["priority"], "destructive" | "outline" | "secondary">
 
+// ── Form state (editable fields only; traceable metadata is read-only) ─────────
 interface ItemForm {
   what: string
   where: string
   details: string
   requested_by: string
+  assigned_to: string   // comma-separated
   priority: ActionItem["priority"]
   due: string
 }
 
 function emptyForm(): ItemForm {
-  return { what: "", where: "", details: "", requested_by: "", priority: "media", due: "" }
+  return { what: "", where: "", details: "", requested_by: "", assigned_to: "", priority: "media", due: "" }
 }
 
 function itemToForm(item: ActionItem): ItemForm {
@@ -70,17 +73,24 @@ function itemToForm(item: ActionItem): ItemForm {
     where: item.where ?? "",
     details: item.details ?? "",
     requested_by: item.requested_by ?? "",
+    assigned_to: (item.assigned_to ?? []).join(", "),
     priority: item.priority,
     due: item.due ?? "",
   }
 }
 
+function parseAssignedTo(raw: string): string[] | null {
+  const arr = raw.split(",").map((s) => s.trim()).filter(Boolean)
+  return arr.length > 0 ? arr : null
+}
+
 interface ActionItemsProps {
   meetingId: number
   items: ActionItem[]
+  onSeek?: (seconds: number) => void
 }
 
-export function ActionItems({ meetingId, items }: ActionItemsProps) {
+export function ActionItems({ meetingId, items, onSeek }: ActionItemsProps) {
   const queryClient = useQueryClient()
 
   const [editItem, setEditItem] = useState<ActionItem | null>(null)
@@ -121,6 +131,7 @@ export function ActionItems({ meetingId, items }: ActionItemsProps) {
         where: form.where.trim() || null,
         details: form.details.trim() || null,
         requested_by: form.requested_by.trim() || null,
+        assigned_to: parseAssignedTo(form.assigned_to),
         priority: form.priority,
         due: form.due.trim() || null,
       }),
@@ -151,6 +162,7 @@ export function ActionItems({ meetingId, items }: ActionItemsProps) {
         where: form.where.trim() || null,
         details: form.details.trim() || null,
         requested_by: form.requested_by.trim() || null,
+        assigned_to: parseAssignedTo(form.assigned_to),
         priority: form.priority,
       }),
     onSuccess: () => {
@@ -224,11 +236,11 @@ export function ActionItems({ meetingId, items }: ActionItemsProps) {
               <TableRow>
                 <TableHead className="w-10 pl-6" />
                 <TableHead>O quê</TableHead>
+                <TableHead>Responsáveis</TableHead>
                 <TableHead>Onde</TableHead>
-                <TableHead>Pedido por</TableHead>
                 <TableHead>Prioridade</TableHead>
                 <TableHead>Prazo</TableHead>
-                <TableHead className="w-16 pr-4" />
+                <TableHead className="w-24 pr-4" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -257,12 +269,50 @@ export function ActionItems({ meetingId, items }: ActionItemsProps) {
                     {item.details && (
                       <p className="mt-0.5 text-xs text-muted-foreground">{item.details}</p>
                     )}
+                    {/* Traceable metadata row */}
+                    <div className="mt-1 flex flex-wrap items-center gap-1">
+                      <Badge
+                        variant={item.review_status === "confirmed" ? "secondary" : "outline"}
+                        className={cn(
+                          "h-4 px-1 text-[10px]",
+                          item.review_status === "confirmed"
+                            ? "border-green-500 text-green-700 dark:text-green-400"
+                            : "border-amber-500 text-amber-600 dark:text-amber-400",
+                        )}
+                      >
+                        {item.review_status === "confirmed" ? "confirmado" : "revisar"}
+                      </Badge>
+                      <Badge
+                        variant="outline"
+                        className="h-4 px-1 text-[10px] text-muted-foreground"
+                      >
+                        {item.explicitness === "explicit" ? "explícito" : "inferido"}
+                      </Badge>
+                      {item.source_start != null && (
+                        <button
+                          type="button"
+                          onClick={() => onSeek?.(item.source_start!)}
+                          className="inline-flex items-center gap-0.5 rounded text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+                          title={item.evidence_quote ?? undefined}
+                        >
+                          <Clock className="size-2.5" />
+                          {formatTs(item.source_start)}
+                        </button>
+                      )}
+                    </div>
+                    {item.evidence_quote && (
+                      <p className="mt-1 text-[11px] italic text-muted-foreground line-clamp-2 border-l-2 border-muted pl-2">
+                        {item.evidence_quote}
+                      </p>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground">
+                    {item.assigned_to && item.assigned_to.length > 0
+                      ? item.assigned_to.join(", ")
+                      : (item.requested_by ?? "—")}
                   </TableCell>
                   <TableCell className="text-sm text-muted-foreground">
                     {item.where ?? "—"}
-                  </TableCell>
-                  <TableCell className="text-sm text-muted-foreground">
-                    {item.requested_by ?? "—"}
                   </TableCell>
                   <TableCell>
                     <Badge
@@ -324,6 +374,16 @@ export function ActionItems({ meetingId, items }: ActionItemsProps) {
               />
             </div>
             <div className="space-y-1.5">
+              <Label htmlFor="edit-assigned-to">Responsáveis</Label>
+              <Input
+                id="edit-assigned-to"
+                placeholder="Nome 1, Nome 2"
+                value={editForm.assigned_to}
+                onChange={(e) => setEditForm((f) => ({ ...f, assigned_to: e.target.value }))}
+              />
+              <p className="text-[11px] text-muted-foreground">Separe múltiplos nomes por vírgula</p>
+            </div>
+            <div className="space-y-1.5">
               <Label htmlFor="edit-where">Onde</Label>
               <Input
                 id="edit-where"
@@ -376,6 +436,23 @@ export function ActionItems({ meetingId, items }: ActionItemsProps) {
                 />
               </div>
             </div>
+            {/* Read-only traceable metadata — shown when present */}
+            {editItem && (editItem.evidence_quote || editItem.source_start != null) && (
+              <div className="rounded-md border border-dashed p-3 space-y-1">
+                <p className="text-xs font-medium text-muted-foreground">Evidência (só leitura)</p>
+                {editItem.source_start != null && (
+                  <p className="text-xs text-muted-foreground">
+                    Origem: {formatTs(editItem.source_start)}
+                    {editItem.source_end != null && ` — ${formatTs(editItem.source_end)}`}
+                  </p>
+                )}
+                {editItem.evidence_quote && (
+                  <p className="text-xs italic text-muted-foreground border-l-2 border-muted pl-2">
+                    {editItem.evidence_quote}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button
@@ -437,6 +514,16 @@ export function ActionItems({ meetingId, items }: ActionItemsProps) {
                 onChange={(e) => setAddForm((f) => ({ ...f, what: e.target.value }))}
                 autoFocus
               />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="add-assigned-to">Responsáveis</Label>
+              <Input
+                id="add-assigned-to"
+                placeholder="Nome 1, Nome 2"
+                value={addForm.assigned_to}
+                onChange={(e) => setAddForm((f) => ({ ...f, assigned_to: e.target.value }))}
+              />
+              <p className="text-[11px] text-muted-foreground">Separe múltiplos nomes por vírgula</p>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="add-where">Onde</Label>

@@ -43,6 +43,8 @@ export interface MeetingRow {
   media_managed: boolean
   media_ok: boolean      // source existe no disco
   duration: number       // segundos (float)
+  project_id: number | null
+  project_name: string | null
 }
 
 export interface SearchResult {
@@ -59,9 +61,26 @@ export interface ActionItem {
   where: string | null
   details: string | null
   requested_by: string | null
+  assigned_to: string[] | null
   priority: "alta" | "media" | "baixa"
   status: "aberto" | "feito"
   due: string | null
+  source_start: number | null
+  source_end: number | null
+  evidence_quote: string | null
+  explicitness: "explicit" | "inferred"
+  review_status: "confirmed" | "needs_review"
+}
+
+export interface MeetingFact {
+  id: number
+  kind: "decision" | "requirement" | "constraint" | "open_question"
+  text: string
+  source_start: number | null
+  source_end: number | null
+  evidence_quote: string | null
+  explicitness: "explicit" | "inferred"
+  review_status: "confirmed" | "needs_review"
 }
 
 export interface TranscriptGroup {
@@ -96,6 +115,9 @@ export interface MeetingDetail {
   pending: string[]            // labels SPEAKER_XX aguardando nome
   speaker_matches: Record<string, number>  // nome → similaridade cosseno
   groups: TranscriptGroup[]
+  project_id: number | null
+  project_name: string | null
+  facts?: MeetingFact[]
 }
 
 export interface BrowseEntry {
@@ -138,6 +160,7 @@ export interface ProcessRequest {
   num_speakers?: number  // nº de falantes remotos (0 = automático)
   no_llm?: boolean
   import_media?: boolean
+  project_id?: number | null
 }
 
 export interface SettingsInfo {
@@ -164,7 +187,44 @@ export interface Task {
   where: string | null
   details: string | null
   requested_by: string | null
+  assigned_to: string[] | null
   priority: "alta" | "media" | "baixa"
   status: "aberto" | "feito"
   due: string | null
+  project_id: number | null
+  project_name: string | null
+  review_status?: "confirmed" | "needs_review"
+  explicitness?: "explicit" | "inferred"
+  evidence_quote?: string | null
+}
+
+export interface ContextExportRequest {
+  task_ids: number[]
+  objective?: string
+  format?: "markdown" | "json"
+  include_summary?: boolean
+  include_facts?: boolean
+  include_evidence?: boolean
+  include_transcript?: boolean
+}
+
+export interface ContextExportResponse {
+  format: "markdown" | "json"
+  filename: string
+  content: string
+  task_count: number
+  meeting_count: number
+}
+
+export interface Project {
+  id: number
+  name: string
+  description: string
+  repo_path: string
+  meeting_count: number
+  open_task_count: number
+  done_task_count: number
+  last_meeting_date: string | null
+  created_at: string
+  updated_at: string
 }

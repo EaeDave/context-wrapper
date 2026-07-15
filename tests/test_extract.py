@@ -154,10 +154,12 @@ def test_deduplicate_preserva_detalhes_prioridade_e_intervalo() -> None:
             "where": "/API/orders",
             "details": "Manter compatibilidade por 30 dias",
             "requested_by": "Alice",
-            "assigned_to": "me",
+            "assigned_to": ["me", "Bob"],
             "priority": "alta",
             "source_start": "00:41:50",
             "source_end": "00:42:45",
+            "evidence_quote": "Vamos atualizar endpoint",
+            "explicitness": "explicit",
         },
     ]
 
@@ -167,10 +169,12 @@ def test_deduplicate_preserva_detalhes_prioridade_e_intervalo() -> None:
             "where": "/api/orders",
             "details": "Aceitar external_id\nManter compatibilidade por 30 dias",
             "requested_by": "Alice",
-            "assigned_to": "me",
+            "assigned_to": ["me", "Bob"],
             "priority": "alta",
             "source_start": "00:41:50",
             "source_end": "00:42:45",
+            "evidence_quote": "Vamos atualizar endpoint",
+            "explicitness": "explicit",
         }
     ]
 
@@ -261,7 +265,7 @@ def test_extract_curto_emite_progresso_indeterminado_e_conclusao(
     segs = [TranscriptSegment(start=0, end=5, text="Olá pessoal", speaker="Alice")]
     progress: list[tuple[float | None, str]] = []
 
-    summary, items, title = extract(
+    summary, items, title, facts = extract(
         segs, ["Alice"], _settings(), on_progress=lambda value, detail: progress.append((value, detail))
     )
 
@@ -271,6 +275,7 @@ def test_extract_curto_emite_progresso_indeterminado_e_conclusao(
     assert items[0].what == "Corrigir login"
     assert items[0].priority == "alta"
     assert items[0].where == "/auth"
+    assert isinstance(facts, list)
     assert progress == [
         (None, "Gerando resumo e tarefas com LLM"),
         (1.0, "Resumo e tarefas gerados"),
@@ -282,15 +287,16 @@ def test_extract_item_missing_fields_get_defaults(monkeypatch: pytest.MonkeyPatc
     response = '{"title": "T", "summary": "S", "action_items": [{"what": "Do thing"}]}'
     monkeypatch.setattr(extract_mod, "get_provider", lambda _: _FakeProvider(response))
 
-    _, items, _ = extract([], [], _settings())
+    _, items, _, _ = extract([], [], _settings())
     assert items[0].where is None
     assert items[0].priority == "media"
 
 
 
-def test_extract_mantem_so_tarefas_do_dono_ou_sem_dono(
+def test_extract_retorna_todas_as_tarefas_inclusive_terceiros(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """extract() agora retorna TODAS as tarefas; filtro pessoal fica no store."""
     response = """{
       "title": "T", "summary": "S", "action_items": [
         {"what": "Eu preparo o deploy", "requested_by": "Alice", "assigned_to": "me"},
@@ -301,14 +307,23 @@ def test_extract_mantem_so_tarefas_do_dono_ou_sem_dono(
     }"""
     monkeypatch.setattr(extract_mod, "get_provider", lambda _: _FakeProvider(response))
 
-    _, items, _ = extract([], ["me", "Alice"], _settings())
+    _, items, _, _ = extract([], ["me", "Alice"], _settings())
 
-    assert [item.what for item in items] == [
-        "Eu preparo o deploy",
-        "Revisar a documentação",
-        "Compatibilidade antiga sem campo",
-    ]
-    assert items[0].requested_by == "Alice"
+    # All 4 items returned — no filtering at extraction level
+    assert len(items) == 4
+    whats = [i.what for i in items]
+    assert "Eu preparo o deploy" in whats
+    assert "Alice corrige o login" in whats
+    assert "Revisar a documentação" in whats
+    assert "Compatibilidade antiga sem campo" in whats
+    # assigned_to normalized correctly
+    deploy = next(i for i in items if i.what == "Eu preparo o deploy")
+    assert deploy.assigned_to == ["me"]
+    assert deploy.requested_by == "Alice"
+    alice = next(i for i in items if i.what == "Alice corrige o login")
+    assert alice.assigned_to == ["Alice"]
+    no_owner = next(i for i in items if i.what == "Revisar a documentação")
+    assert no_owner.assigned_to is None
 
 
 def test_extract_longo_analisa_todos_blocos_e_consolida(
@@ -372,7 +387,7 @@ def test_extract_longo_analisa_todos_blocos_e_consolida(
     monkeypatch.setattr(extract_mod, "get_provider", lambda _: provider)
     progress: list[tuple[float | None, str]] = []
 
-    summary, items, title = extract(
+    summary, items, title, facts = extract(
         segments,
         ["me", "Alice"],
         _settings(),
@@ -396,11 +411,14 @@ def test_extract_longo_analisa_todos_blocos_e_consolida(
 
     assert title == "Reunião longa"
     assert "decisões e requisitos" in summary
-    assert [item.what.strip() for item in items] == [
-        "Atualizar /api/orders",
-        "Definir responsável pelo rollout",
-    ]
-    assert items[0].details == "Preservar paginação"
+    # All items returned (no owner filter at extract level)
+    item_whats = [item.what.strip() for item in items]
+    assert "Atualizar /api/orders" in item_whats
+    assert "Definir responsável pelo rollout" in item_whats
+    # Third-party item also included
+    assert "Alice migra o banco" in item_whats
+    assert items[next(i for i, it in enumerate(items) if "Atualizar" in it.what)].details == "Preservar paginação"
+    assert isinstance(facts, list)
 
     block_count = len(chunk_calls)
     assert progress[0] == (0.0, f"Analisando bloco 1 de {block_count}")
@@ -435,9 +453,9 @@ def test_extract_explica_identidade_e_atribuicao_ao_provider(
 
     extract(segments, ["me", "Alice"], _settings())
 
-    assert 'label literal "me" é o dono destas notas' in captured["system"]
-    assert "NÃO inclua tarefa atribuída explicitamente" in captured["system"]
-    assert '"requested_by" é quem pediu a tarefa' in captured["system"]
+    assert "REGRAS DE RASTREABILIDADE" in captured["system"]
+    assert "assigned_to" in captured["system"]
+    assert '"requested_by"' in captured["system"]
     assert "[00:00:00-00:00:01] me: Eu faço o deploy" in captured["user"]
     assert "[00:00:01-00:00:02] Alice: Eu corrijo o login" in captured["user"]
 
@@ -454,7 +472,7 @@ def test_extract_skips_non_dict_items(monkeypatch: pytest.MonkeyPatch) -> None:
     response = '{"title": "T", "summary": "S", "action_items": [null, "bad", {"what": "ok"}]}'
     monkeypatch.setattr(extract_mod, "get_provider", lambda _: _FakeProvider(response))
 
-    _, items, _ = extract([], [], _settings())
+    _, items, _, _ = extract([], [], _settings())
     assert len(items) == 1
     assert items[0].what == "ok"
 
@@ -599,7 +617,7 @@ def test_analyse_propaga_callback_da_extracao_ao_tracker(
         on_progress(0.5, "Analisando bloco 2 de 4")
         on_progress(None, "Consolidando análises dos blocos")
         on_progress(1.0, "Resumo e tarefas consolidados")
-        return "Resumo", [], "Título"
+        return "Resumo", [], "Título", []
 
     monkeypatch.setattr(extract_mod, "extract", fake_extract)
     updates = []
@@ -662,7 +680,7 @@ def test_reextract_propaga_progresso_estruturado(
         on_progress(0.25, "Bloco 1 de 3 analisado")
         on_progress(None, "Consolidando análises dos blocos")
         on_progress(1.0, "Resumo e tarefas consolidados")
-        return "Resumo novo", [], "Título ignorado"
+        return "Resumo novo", [], "Título ignorado", []
 
     monkeypatch.setattr(extract_mod, "extract", fake_extract)
     updates = []
@@ -758,3 +776,142 @@ def test_claude_code_nonzero_exit_raises(monkeypatch: pytest.MonkeyPatch) -> Non
 
     with pytest.raises(RuntimeError, match="rate limited"):
         ClaudeCodeProvider("").complete("sys", "user")
+
+
+# ---------------------------------------------------------------------------
+# Traceable extraction: parse_hms, normalize_assigned_to, validate_evidence
+# ---------------------------------------------------------------------------
+
+from meet.extract import (
+    _fact_from_dict,
+    _normalize_assigned_to,
+    _parse_hms,
+    _validate_evidence,
+)
+
+
+def test_parse_hms_valid() -> None:
+    assert _parse_hms("00:00:00") == 0.0
+    assert _parse_hms("01:02:03") == 3723.0
+    assert _parse_hms("00:42:30") == 2550.0
+
+
+def test_parse_hms_invalid() -> None:
+    assert _parse_hms(None) is None
+    assert _parse_hms("bad") is None
+    assert _parse_hms("01:02") is None
+    assert _parse_hms(123) is None
+    assert _parse_hms("00:60:00") is None
+    assert _parse_hms("00:00:60") is None
+    assert _parse_hms("-01:00:00") is None
+
+
+def test_normalize_assigned_to_string_me() -> None:
+    assert _normalize_assigned_to("me") == ["me"]
+
+
+def test_normalize_assigned_to_list() -> None:
+    assert _normalize_assigned_to(["me", "Alice"]) == ["me", "Alice"]
+
+
+def test_normalize_assigned_to_null_sentinels() -> None:
+    assert _normalize_assigned_to(None) is None
+    assert _normalize_assigned_to("") is None
+    assert _normalize_assigned_to("null") is None
+    assert _normalize_assigned_to([]) is None
+    assert _normalize_assigned_to(["null"]) is None
+
+
+def test_validate_evidence_confirmed() -> None:
+    segs = [TranscriptSegment(start=10.0, end=20.0, text="Alice vai fazer o deploy")]
+    assert _validate_evidence(segs, 10.0, 20.0, "Alice vai fazer o deploy") is True
+
+
+def test_validate_evidence_needs_review_bad_interval() -> None:
+    segs = [TranscriptSegment(start=10.0, end=20.0, text="Alice vai fazer o deploy")]
+    # interval doesn't overlap
+    assert _validate_evidence(segs, 25.0, 30.0, "Alice vai fazer o deploy") is False
+
+
+def test_validate_evidence_needs_review_no_quote() -> None:
+    segs = [TranscriptSegment(start=10.0, end=20.0, text="Alice vai fazer o deploy")]
+    assert _validate_evidence(segs, 10.0, 20.0, None) is False
+
+
+def test_validate_evidence_needs_review_wrong_quote() -> None:
+    segs = [TranscriptSegment(start=10.0, end=20.0, text="Alice vai fazer o deploy")]
+    assert _validate_evidence(segs, 10.0, 20.0, "Bob vai fazer o build") is False
+
+
+def test_action_item_from_dict_review_status_confirmed() -> None:
+    segs = [TranscriptSegment(start=10.0, end=20.0, text="Bob vai fazer o login")]
+    d = {
+        "what": "corrigir login",
+        "assigned_to": ["Bob"],
+        "source_start": "00:00:10",
+        "source_end": "00:00:20",
+        "evidence_quote": "Bob vai fazer o login",
+        "explicitness": "explicit",
+    }
+    from meet.extract import _action_item_from_dict
+    item = _action_item_from_dict(d, segs)
+    assert item.review_status == "confirmed"
+    assert item.explicitness == "explicit"
+    assert item.assigned_to == ["Bob"]
+    assert item.source_start == 10.0
+    assert item.source_end == 20.0
+
+
+def test_action_item_from_dict_review_status_needs_review_no_quote() -> None:
+    from meet.extract import _action_item_from_dict
+    d = {"what": "corrigir login", "source_start": "00:00:10", "source_end": "00:00:20"}
+    item = _action_item_from_dict(d, [])
+    assert item.review_status == "needs_review"
+
+
+def test_fact_from_dict_confirmed() -> None:
+    segs = [TranscriptSegment(start=0.0, end=5.0, text="vamos usar PostgreSQL")]
+    d = {
+        "kind": "decision",
+        "text": "usar PostgreSQL",
+        "source_start": "00:00:00",
+        "source_end": "00:00:05",
+        "evidence_quote": "vamos usar PostgreSQL",
+        "explicitness": "explicit",
+    }
+    fact = _fact_from_dict(d, "decision", segs)
+    assert fact.kind == "decision"
+    assert fact.review_status == "confirmed"
+    assert fact.source_start == 0.0
+    assert fact.source_end == 5.0
+
+
+def test_extract_retorna_fatos(monkeypatch: pytest.MonkeyPatch) -> None:
+    """extract() retorna MeetingFact dos 4 kinds quando LLM os fornece."""
+    response = json.dumps({
+        "title": "T",
+        "summary": "S",
+        "facts": [
+            {"kind": "decision", "text": "usar Redis", "evidence_quote": "vamos usar Redis",
+             "source_start": "00:00:01", "source_end": "00:00:03", "explicitness": "explicit"},
+            {"kind": "requirement", "text": "latência < 200ms", "evidence_quote": None,
+             "source_start": None, "source_end": None, "explicitness": "inferred"},
+            {"kind": "constraint", "text": "orçamento fixo", "evidence_quote": None,
+             "source_start": None, "source_end": None, "explicitness": "inferred"},
+            {"kind": "open_question", "text": "quem faz deploy?", "evidence_quote": None,
+             "source_start": None, "source_end": None, "explicitness": "inferred"},
+        ],
+        "action_items": [],
+    })
+    monkeypatch.setattr(extract_mod, "get_provider", lambda _: _FakeProvider(response))
+    segs = [TranscriptSegment(start=1.0, end=3.0, text="vamos usar Redis")]
+
+    _, _, _, facts = extract(segs, [], _settings())
+    assert len(facts) == 4
+    kinds = {f.kind for f in facts}
+    assert kinds == {"decision", "requirement", "constraint", "open_question"}
+    redis = next(f for f in facts if f.kind == "decision")
+    assert redis.review_status == "confirmed"
+    assert redis.source_start == 1.0
+    lat = next(f for f in facts if f.kind == "requirement")
+    assert lat.review_status == "needs_review"

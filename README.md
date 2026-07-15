@@ -18,12 +18,27 @@ gravação (OBS) ──> wav 16k ──> transcrição + diarização ──> LL
   vozes, extrai resumo/action items, salva o resultado e, por padrão, importa a
   mídia. A opção “Sem LLM” mantém transcrição e diarização, sem resumo nem
   action items. **Job interno:** `process`; **endpoint interno:** `POST /api/process`.
-- Action items formam uma lista pessoal do usuário. A LLM mantém tarefas
-  atribuídas a `me`, tarefas compartilhadas que incluam `me` e tarefas cujo
-  responsável realmente ficou indefinido; tarefas explicitamente atribuídas
-  somente a terceiros são excluídas. Quem pediu (`requested_by`) não é
-  confundido com quem executará. A mesma regra vale ao processar, reprocessar ou
-  reextrair uma reunião. **Jobs internos:** `process`, `reprocess`, `reextract`.
+- A extração preserva todas as tarefas discutidas, inclusive as atribuídas só a
+  terceiros, e separa quem pediu de quem executará. Também registra decisões,
+  requisitos, restrições e questões em aberto. Tarefas e fatos guardam o trecho
+  temporal, a citação usada como evidência, se o conteúdo foi explícito ou
+  inferido e se a evidência pôde ser confirmada no transcript. A mesma regra
+  vale ao processar, reprocessar ou reextrair. **Jobs internos:** `process`,
+  `reprocess`, `reextract`.
+- O Task Studio abre como lista pessoal: inclui tarefas sem responsável ou com
+  `me` entre os responsáveis e deixa tarefas exclusivas de terceiros na visão
+  “Delegadas”. É possível alternar entre abertas, concluídas e todas, além de
+  filtrar por projeto, prioridade e busca. **Endpoint interno:** `GET /api/tasks`.
+- Reuniões podem ficar sem projeto ou ser organizadas em projetos com nome,
+  descrição e caminho do repositório. Um projeto agrega reuniões e contadores
+  das tarefas pessoais; excluí-lo apenas desassocia suas reuniões, sem apagar
+  reuniões ou conteúdo. **Endpoints internos:** `/api/projects/*`,
+  `PATCH /api/meetings/{id}` e `PATCH /api/meetings/bulk-project`.
+- Tarefas selecionadas no Task Studio viram um pacote de contexto para outra
+  LLM, em Markdown ou JSON. O pacote pode incluir objetivo, resumos, fatos,
+  evidências e, opcionalmente, o transcript integral; ele só agrupa conteúdo já
+  persistido, sem pedir nova geração à LLM. **Endpoint interno:**
+  `POST /api/context/export`.
 - Em reuniões longas, nenhum trecho intermediário é descartado para caber no
   contexto da LLM. O transcript é analisado em blocos temporais sobrepostos e
   depois consolidado em ordem; decisões, requisitos, correções posteriores e
@@ -168,9 +183,10 @@ tracks separadas do mkv original.
 ### Interface web
 
 UI local em **React + Tailwind + shadcn/ui** (SPA servida pelo FastAPI): listar
-reuniões, processar gravações, acompanhar jobs em tempo real (SSE), ver
-transcript com seek no player, action items, nomear falantes, busca no
-histórico (inline + paleta `Ctrl+K`).
+e organizar reuniões por projeto, processar gravações, acompanhar jobs em tempo
+real (SSE), revisar transcript/fatos/action items com evidência, gerenciar
+tarefas no Task Studio, exportar contexto para outra LLM, nomear falantes e
+buscar no histórico (inline + paleta `Ctrl+K`).
 
 O frontend precisa ser compilado uma vez (e a cada mudança em `frontend/`):
 

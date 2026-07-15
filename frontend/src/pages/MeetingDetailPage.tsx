@@ -18,8 +18,9 @@ import {
   Wand2,
   Fingerprint,
   Copy,
+  FolderKanban,
 } from "lucide-react"
-import type { MeetingDetail } from "@/lib/types"
+import type { MeetingDetail, Project } from "@/lib/types"
 import * as api from "@/lib/api"
 import { formatDuration } from "@/lib/format"
 import { copyToClipboard } from "@/lib/utils"
@@ -54,12 +55,20 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Player } from "@/components/meeting/player"
 import type { PlayerHandle } from "@/components/meeting/player"
 import { Transcript } from "@/components/meeting/transcript"
 import { ActionItems } from "@/components/meeting/action-items"
 import { SpeakerAssign } from "@/components/meeting/speaker-assign"
 import { ManageCard } from "@/components/meeting/manage"
+import { MeetingFacts } from "@/components/meeting/meeting-facts"
 import { cn } from "@/lib/utils"
 
 // ─── Speaker colour convention (shared with Transcript) ───────────────────────
@@ -324,6 +333,11 @@ export default function MeetingDetailPage() {
     enabled: !Number.isNaN(meetingId),
   })
 
+  const projectsQuery = useQuery<Project[]>({
+    queryKey: ["projects"],
+    queryFn: api.getProjects,
+  })
+
   // ── Rename mutation ──────────────────────────────────────────────────────
   const renameMutation = useMutation({
     mutationFn: (title: string) => api.updateTitle(meetingId, title),
@@ -385,6 +399,19 @@ export default function MeetingDetailPage() {
     onError: (e: Error) => toast.error(e.message),
   })
 
+  // ── Set project mutation ──────────────────────────────────────────────────
+  const setMeetingProjectMutation = useMutation({
+    mutationFn: (projectId: number | null) =>
+      api.setMeetingProject(meetingId, projectId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["meeting", meetingId] })
+      queryClient.invalidateQueries({ queryKey: ["meetings"] })
+      queryClient.invalidateQueries({ queryKey: ["projects"] })
+      toast.success("Projeto atualizado")
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
   const handleRenameOpen = useCallback(() => {
     setRenameValue(meeting?.title ?? "")
     setRenameOpen(true)
@@ -421,6 +448,32 @@ export default function MeetingDetailPage() {
         onReprocess={() => setReprocessOpen(true)}
       />
 
+      {/* Project selector */}
+      <div className="mt-3 flex items-center gap-2">
+        <FolderKanban className="size-4 shrink-0 text-muted-foreground" />
+        <Select
+          value={String(meeting.project_id ?? "none")}
+          onValueChange={(v) =>
+            setMeetingProjectMutation.mutate(v === "none" ? null : Number(v))
+          }
+        >
+          <SelectTrigger className="h-8 w-52 text-sm">
+            <SelectValue placeholder="Sem projeto" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="none">Sem projeto</SelectItem>
+            {(projectsQuery.data ?? []).map((p) => (
+              <SelectItem key={p.id} value={String(p.id)}>
+                {p.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {setMeetingProjectMutation.isPending && (
+          <span className="text-xs text-muted-foreground">Salvando…</span>
+        )}
+      </div>
+
       {/*
        * Two-column layout on lg+:
        *   - Player/ManageCard on the right (sticky, appears first in DOM → top on mobile)
@@ -447,7 +500,9 @@ export default function MeetingDetailPage() {
 
           {meeting.pending.length > 0 && <SpeakerAssign meeting={meeting} />}
 
-          <ActionItems meetingId={meetingId} items={meeting.action_items} />
+          <ActionItems meetingId={meetingId} items={meeting.action_items} onSeek={seekTo} />
+
+          <MeetingFacts facts={meeting.facts ?? []} onSeek={seekTo} />
 
           <Transcript
             meetingId={meetingId}

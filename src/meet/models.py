@@ -63,13 +63,35 @@ class ActionItem:
     """Tarefa acionável extraída da reunião."""
 
     what: str
-    where: str | None = None  # tela, endpoint, módulo, repositório...
-    details: str | None = None  # detalhes técnicos literais mencionados
+    where: str | None = None          # tela, endpoint, módulo, repositório...
+    details: str | None = None        # detalhes técnicos literais mencionados
     requested_by: str | None = None
-    priority: str = "media"  # "alta" | "media" | "baixa"
-    id: int | None = None       # preenchido ao ler do banco
-    status: str = "aberto"      # "aberto" | "feito"
-    due: str | None = None      # "YYYY-MM-DD" ou None
+    priority: str = "media"           # "alta" | "media" | "baixa"
+    id: int | None = None             # preenchido ao ler do banco
+    status: str = "aberto"            # "aberto" | "feito"
+    due: str | None = None            # "YYYY-MM-DD" ou None
+    # Campos rastreáveis (opcionais; defaults retrocompatíveis)
+    assigned_to: list[str] | None = None
+    source_start: float | None = None
+    source_end: float | None = None
+    evidence_quote: str | None = None
+    explicitness: str = "inferred"    # "explicit" | "inferred"
+    review_status: str = "needs_review"  # "confirmed" | "needs_review"
+
+
+@dataclass
+class MeetingFact:
+    """Fato estruturado extraído da reunião."""
+
+    kind: str  # "decision" | "requirement" | "constraint" | "open_question"
+    text: str
+    source_start: float | None = None
+    source_end: float | None = None
+    evidence_quote: str | None = None
+    explicitness: str = "inferred"       # "explicit" | "inferred"
+    review_status: str = "needs_review"  # "confirmed" | "needs_review"
+    id: int | None = None
+
 
 @dataclass
 class MeetingResult:
@@ -82,6 +104,8 @@ class MeetingResult:
     participants: list[str] = field(default_factory=list)
     summary: str = ""
     action_items: list[ActionItem] = field(default_factory=list)
+    facts: list[MeetingFact] = field(default_factory=list)
     segments: list[TranscriptSegment] = field(default_factory=list)
     # nome_resolvido → score de cosseno; só entradas casadas (label≠nome)
     speaker_matches: dict[str, float] = field(default_factory=dict)
+    project_id: int | None = None

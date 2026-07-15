@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .config import Settings
-from .models import ActionItem, TranscriptSegment
+from .models import ActionItem, MeetingFact, TranscriptSegment
 
 # Reuniões que cabem neste limite mantêm a chamada única existente.
 _MAX_TRANSCRIPT_CHARS = 100_000
@@ -30,53 +30,63 @@ O JSON deve seguir exatamente este schema (sem markdown, sem comentários):
 {
   "title": "<título conciso da reunião em PT-BR>",
   "summary": "<resumo executivo em PT-BR, 3-6 frases, preservando termos técnicos literais>",
+  "facts": [
+    {
+      "kind": "<decision | requirement | constraint | open_question>",
+      "text": "<texto literal da decisão/requisito/restrição/questão>",
+      "source_start": "<HH:MM:SS ou null>",
+      "source_end": "<HH:MM:SS ou null>",
+      "evidence_quote": "<trecho literal do transcript que sustenta o fato, ou null>",
+      "explicitness": "<explicit | inferred>"
+    }
+  ],
   "action_items": [
     {
       "what": "<o que precisa ser feito>",
       "where": "<tela, endpoint, módulo, repositório — ou null se não aplicável>",
       "details": "<detalhes técnicos literais mencionados — ou null>",
       "requested_by": "<nome de quem pediu, ou null se não identificado>",
-      "assigned_to": "<me se o dono destas notas participa da execução; nome/label de terceiro; ou null se não há responsável claro>",
-      "priority": "<alta | media | baixa>"
+      "assigned_to": ["me"] ou ["Alice"] ou ["me","Bob"] ou null,
+      "priority": "<alta | media | baixa>",
+      "source_start": "<HH:MM:SS ou null>",
+      "source_end": "<HH:MM:SS ou null>",
+      "evidence_quote": "<trecho literal do transcript que originou a tarefa, ou null>",
+      "explicitness": "<explicit | inferred>"
     }
   ]
 }
 
 Participantes identificados: __PARTICIPANTS__
 
-REGRA OBRIGATÓRIA DE RESPONSABILIDADE DOS ACTION ITEMS:
-- O participante com label literal "me" é o dono destas notas.
-- A lista é pessoal: inclua somente tarefas atribuídas a "me", tarefas compartilhadas que
-  incluam "me", ou tarefas acionáveis cujo responsável realmente ficou indefinido.
-- NÃO inclua tarefa atribuída explicitamente a outra pessoa ou equipe sem participação de
-  "me". Isso vale mesmo que a tarefa seja importante ou tenha sido discutida em detalhes.
-- Use "assigned_to": "me" quando "me" participa da execução. Use null somente quando o
-  contexto não define responsável. Se identificar responsabilidade exclusiva de terceiro,
-  use seu nome/label para classificar, mas omita esse item de action_items.
-- "requested_by" é quem pediu a tarefa, não quem vai executá-la. Um terceiro pode pedir uma
-  tarefa para "me"; nesse caso ela deve ser incluída.
-- Resolva pronomes pelo falante e pelo contexto: se "me" diz "eu faço", a tarefa é de "me";
-  se outro participante diz "eu faço", a tarefa é desse participante e deve ser omitida;
-  se alguém atribui explicitamente algo a "você" referindo-se a "me", inclua.
-- Se "me" não aparecer no transcript, não invente sua identidade. Ainda omita atribuições
-  inequívocas a terceiros e mantenha como null somente o que de fato ficou sem dono claro.
+REGRAS DE RASTREABILIDADE:
+- source_start/source_end: timestamps HH:MM:SS do trecho do transcript; null se não identificável.
+- evidence_quote: copie literalmente o trecho mais curto que justifica o fato/tarefa; null se não houver trecho claro.
+- explicitness: "explicit" quando mencionado diretamente; "inferred" quando deduzido por contexto.
+- assigned_to: array JSON de responsáveis (use "me" para o dono das notas); null se indefinido. Inclua TODAS as tarefas, inclusive atribuídas a terceiros.
+- Não invente timestamps, citações ou responsáveis.
 """
 
 _CHUNK_SYSTEM_PROMPT = """\
 Você analisa UM BLOCO temporal de uma reunião técnica. Retorne SOMENTE JSON válido.
 
 Preserve literalmente nomes técnicos e classifique todos os candidatos, inclusive tarefas
-atribuídas a terceiros: a consolidação global decidirá o que entra na lista pessoal. Resolva
-"eu" usando o label do falante. Copie os timestamps do transcript para cada evidência.
+atribuídas a terceiros. Resolva "eu" usando o label do falante. Copie os timestamps do
+transcript para cada evidência.
 
 Schema exato:
 {
   "chunk_summary": "<síntese factual e concisa do bloco>",
   "decisions": [
-    {"what": "<decisão>", "source_start": "<HH:MM:SS>", "source_end": "<HH:MM:SS>"}
+    {"text": "<decisão>", "source_start": "<HH:MM:SS>", "source_end": "<HH:MM:SS>", "evidence_quote": "<trecho ou null>", "explicitness": "<explicit|inferred>"}
   ],
   "requirements": [
-    {"what": "<requisito>", "source_start": "<HH:MM:SS>", "source_end": "<HH:MM:SS>"}
+    {"text": "<requisito>", "source_start": "<HH:MM:SS>", "source_end": "<HH:MM:SS>", "evidence_quote": "<trecho ou null>", "explicitness": "<explicit|inferred>"}
+  ],
+  "constraints": [
+    {"text": "<restrição>", "source_start": "<HH:MM:SS>", "source_end": "<HH:MM:SS>", "evidence_quote": "<trecho ou null>", "explicitness": "<explicit|inferred>"}
+  ],
+  "open_questions": [
+    {"text": "<questão em aberto>", "source_start": "<HH:MM:SS>", "source_end": "<HH:MM:SS>", "evidence_quote": "<trecho ou null>", "explicitness": "<explicit|inferred>"}
   ],
   "action_items": [
     {
@@ -84,22 +94,23 @@ Schema exato:
       "where": "<local técnico ou null>",
       "details": "<detalhes literais ou null>",
       "requested_by": "<quem pediu ou null>",
-      "assigned_to": "<me, nome/label de terceiro, lista de responsáveis, ou null>",
+      "assigned_to": ["me"] ou ["Alice"] ou null,
       "priority": "<alta | media | baixa>",
       "source_start": "<HH:MM:SS>",
-      "source_end": "<HH:MM:SS>"
+      "source_end": "<HH:MM:SS>",
+      "evidence_quote": "<trecho literal ou null>",
+      "explicitness": "<explicit|inferred>"
     }
   ]
 }
 
-Use null em assigned_to somente quando o bloco realmente não define responsável. Não invente
-decisões, requisitos, tarefas, responsáveis ou timestamps.
+Não invente timestamps, responsáveis ou citações.
 """
 
 _CONSOLIDATE_SYSTEM_PROMPT = """\
 Você consolida análises temporais de uma única reunião técnica. Retorne SOMENTE JSON válido.
 
-Produza visão global coerente, preservando detalhes técnicos, decisões e requisitos de TODOS os
+Produza visão global coerente, preservando detalhes técnicos e rastreabilidade de TODOS os
 blocos. Resolva correções ou reatribuições posteriores pela ordem dos blocos. Remova duplicatas
 sem perder detalhes e mantenha os timestamps de origem recebidos.
 
@@ -107,29 +118,36 @@ O JSON final deve seguir exatamente este schema:
 {
   "title": "<título conciso em PT-BR>",
   "summary": "<resumo executivo em PT-BR, 3-6 frases, incluindo decisões e requisitos centrais>",
+  "facts": [
+    {
+      "kind": "<decision | requirement | constraint | open_question>",
+      "text": "<texto literal>",
+      "source_start": "<HH:MM:SS ou null>",
+      "source_end": "<HH:MM:SS ou null>",
+      "evidence_quote": "<trecho literal ou null>",
+      "explicitness": "<explicit | inferred>"
+    }
+  ],
   "action_items": [
     {
       "what": "<o que precisa ser feito>",
       "where": "<tela, endpoint, módulo, repositório ou null>",
       "details": "<detalhes técnicos literais ou null>",
       "requested_by": "<quem pediu ou null>",
-      "assigned_to": "<me, lista incluindo me, terceiro, ou null>",
+      "assigned_to": ["me"] ou ["Alice","me"] ou ["terceiro"] ou null,
       "priority": "<alta | media | baixa>",
-      "source_start": "<HH:MM:SS>",
-      "source_end": "<HH:MM:SS>"
+      "source_start": "<HH:MM:SS ou null>",
+      "source_end": "<HH:MM:SS ou null>",
+      "evidence_quote": "<trecho literal ou null>",
+      "explicitness": "<explicit | inferred>"
     }
   ]
 }
 
 Participantes identificados: __PARTICIPANTS__
 
-REGRA OBRIGATÓRIA DA LISTA PESSOAL:
-- Inclua tarefas atribuídas a "me", compartilhadas que incluam "me" e tarefas realmente sem
-  responsável claro.
-- Exclua tarefas atribuídas explicitamente somente a terceiros.
-- requested_by identifica quem pediu, nunca quem executará.
-- Se "me" não existir entre os participantes, não invente sua identidade: mantenha somente
-  tarefas sem dono claro e exclua atribuições inequívocas a terceiros.
+Inclua TODAS as tarefas de todos os blocos, inclusive as de terceiros.
+Não invente timestamps, citações ou responsáveis.
 """
 
 
@@ -438,7 +456,10 @@ def _parse_json_response(text: str) -> dict:
 
     raise ValueError(text)
 def _action_item_is_for_owner(d: dict) -> bool:
-    """Mantém tarefas do dono ou sem responsável; exclui terceiros explícitos."""
+    """True se a tarefa pertence ao dono (me) ou não tem responsável definido.
+
+    Mantido para referência; extract() não filtra mais — filtering happens in store.
+    """
     assigned_to = d.get("assigned_to")
     if assigned_to is None:
         return True
@@ -464,13 +485,123 @@ def _action_item_is_for_owner(d: dict) -> bool:
     }
 
 
-def _action_item_from_dict(d: dict) -> ActionItem:
+def _parse_hms(value: object) -> float | None:
+    """Converte HH:MM:SS em segundos; rejeita intervalos fora do relógio."""
+    if not isinstance(value, str):
+        return None
+    parts = value.strip().split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        h, m, s = int(parts[0]), int(parts[1]), float(parts[2])
+    except (ValueError, TypeError):
+        return None
+    if h < 0 or not 0 <= m < 60 or not 0 <= s < 60:
+        return None
+    return h * 3600.0 + m * 60.0 + s
+
+
+def _normalize_assigned_to(value: object) -> list[str] | None:
+    """Normaliza assigned_to do LLM para list[str]|None."""
+    _NONE_SENTINELS = frozenset({
+        "null", "none", "não identificado", "nao identificado",
+        "indefinido", "unknown", "unclear", "",
+    })
+    if value is None:
+        return None
+    if isinstance(value, str):
+        v = value.strip()
+        if v.casefold() in _NONE_SENTINELS:
+            return None
+        return [v]
+    if isinstance(value, list):
+        cleaned = [
+            s.strip()
+            for s in value
+            if isinstance(s, str) and s.strip()
+            and s.strip().casefold() not in _NONE_SENTINELS
+        ]
+        return cleaned if cleaned else None
+    return None
+
+
+def _validate_evidence(
+    segments: list[TranscriptSegment],
+    source_start: float | None,
+    source_end: float | None,
+    evidence_quote: str | None,
+) -> bool:
+    """True quando a citação normalizada aparece nos segmentos sobrepostos ao intervalo."""
+    if evidence_quote is None or source_start is None or source_end is None:
+        return False
+    if source_end < source_start:
+        return False
+    overlapping = [
+        seg for seg in segments
+        if seg.end > source_start and seg.start < source_end
+    ]
+    if not overlapping:
+        return False
+    combined = " ".join(seg.text for seg in overlapping)
+    needle = " ".join(evidence_quote.split()).casefold()
+    haystack = " ".join(combined.split()).casefold()
+    return needle in haystack
+
+
+def _action_item_from_dict(
+    d: dict,
+    segments: list[TranscriptSegment] | None = None,
+) -> ActionItem:
+    source_start = _parse_hms(d.get("source_start"))
+    source_end = _parse_hms(d.get("source_end"))
+    raw_quote = d.get("evidence_quote")
+    evidence_quote = (
+        raw_quote.strip() if isinstance(raw_quote, str) and raw_quote.strip() else None
+    )
+    explicitness = d.get("explicitness") or "inferred"
+    if explicitness not in ("explicit", "inferred"):
+        explicitness = "inferred"
+    segs = segments or []
+    confirmed = _validate_evidence(segs, source_start, source_end, evidence_quote)
     return ActionItem(
         what=d.get("what") or "",
         where=d.get("where") or None,
         details=d.get("details") or None,
         requested_by=d.get("requested_by") or None,
         priority=d.get("priority") or "media",
+        assigned_to=_normalize_assigned_to(d.get("assigned_to")),
+        source_start=source_start,
+        source_end=source_end,
+        evidence_quote=evidence_quote,
+        explicitness=explicitness,
+        review_status="confirmed" if confirmed else "needs_review",
+    )
+
+
+def _fact_from_dict(
+    d: dict,
+    kind: str,
+    segments: list[TranscriptSegment] | None = None,
+) -> MeetingFact:
+    source_start = _parse_hms(d.get("source_start"))
+    source_end = _parse_hms(d.get("source_end"))
+    raw_quote = d.get("evidence_quote")
+    evidence_quote = (
+        raw_quote.strip() if isinstance(raw_quote, str) and raw_quote.strip() else None
+    )
+    explicitness = d.get("explicitness") or "inferred"
+    if explicitness not in ("explicit", "inferred"):
+        explicitness = "inferred"
+    segs = segments or []
+    confirmed = _validate_evidence(segs, source_start, source_end, evidence_quote)
+    return MeetingFact(
+        kind=kind,
+        text=d.get("text") or "",
+        source_start=source_start,
+        source_end=source_end,
+        evidence_quote=evidence_quote,
+        explicitness=explicitness,
+        review_status="confirmed" if confirmed else "needs_review",
     )
 
 
@@ -505,10 +636,27 @@ def _deduplicate_action_items(items: list[dict]) -> list[dict]:
             continue
 
         existing = result[positions[key]]
-        for field in ("requested_by", "assigned_to"):
-            if not existing.get(field) and item.get(field):
-                existing[field] = item[field]
+        if not existing.get("requested_by") and item.get("requested_by"):
+            existing["requested_by"] = item["requested_by"]
 
+        owners: list[str] = []
+        seen_owners: set[str] = set()
+        for raw in (existing.get("assigned_to"), item.get("assigned_to")):
+            values = raw if isinstance(raw, list) else [raw]
+            for owner in values:
+                if not isinstance(owner, str) or not owner.strip():
+                    continue
+                normalized = owner.strip().casefold()
+                if normalized not in seen_owners:
+                    owners.append(owner.strip())
+                    seen_owners.add(normalized)
+        if owners:
+            existing["assigned_to"] = owners
+
+        if not existing.get("evidence_quote") and item.get("evidence_quote"):
+            existing["evidence_quote"] = item["evidence_quote"]
+        if existing.get("explicitness") != "explicit" and item.get("explicitness") == "explicit":
+            existing["explicitness"] = "explicit"
         existing_details = existing.get("details")
         new_details = item.get("details")
         if not existing_details and new_details:
@@ -592,20 +740,35 @@ def _analyse_chunks(
     return data
 
 
-def _result_from_data(data: dict) -> tuple[str, list[ActionItem], str]:
+_VALID_FACT_KINDS = frozenset({"decision", "requirement", "constraint", "open_question"})
+
+
+def _result_from_data(
+    data: dict,
+    segments: list[TranscriptSegment] | None = None,
+) -> tuple[str, list[ActionItem], str, list[MeetingFact]]:
     summary: str = data.get("summary") or ""
     title: str = data.get("title") or ""
+    segs = segments or []
+
+    # All action items — no personal filter; list_tasks/API handles that
     items_raw = data.get("action_items") or []
-    personal_items = [
-        item
-        for item in items_raw
-        if isinstance(item, dict) and _action_item_is_for_owner(item)
-    ]
     action_items = [
-        _action_item_from_dict(item)
-        for item in _deduplicate_action_items(personal_items)
+        _action_item_from_dict(item, segs)
+        for item in _deduplicate_action_items(
+            [item for item in items_raw if isinstance(item, dict)]
+        )
     ]
-    return summary, action_items, title
+
+    # Facts: flat list with kind field
+    facts_raw = data.get("facts") or []
+    facts: list[MeetingFact] = [
+        _fact_from_dict(f, f.get("kind", "decision"), segs)
+        for f in facts_raw
+        if isinstance(f, dict) and f.get("kind") in _VALID_FACT_KINDS
+    ]
+
+    return summary, action_items, title, facts
 
 
 # ---------------------------------------------------------------------------
@@ -618,8 +781,12 @@ def extract(
     participants: list[str],
     settings: Settings,
     on_progress: ExtractionProgressCallback | None = None,
-) -> tuple[str, list[ActionItem], str]:
-    """Extrai reunião curta em uma chamada; reunião longa via map-reduce temporal."""
+) -> tuple[str, list[ActionItem], str, list[MeetingFact]]:
+    """Extrai reunião curta em uma chamada; reunião longa via map-reduce temporal.
+
+    Retorna (summary, action_items, title, facts). Todos os action_items são
+    retornados, inclusive de terceiros; filtragem pessoal ocorre em store.list_tasks.
+    """
     provider = get_provider(settings)
     transcript = _build_transcript(segments)
 
@@ -634,4 +801,4 @@ def extract(
     else:
         data = _analyse_chunks(provider, segments, participants, on_progress)
 
-    return _result_from_data(data)
+    return _result_from_data(data, segments)

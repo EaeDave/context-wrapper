@@ -12,6 +12,9 @@ import type {
   ActionItem,
   Task,
   VoiceUsage,
+  Project,
+  ContextExportRequest,
+  ContextExportResponse,
 } from "./types"
 
 async function request<T>(
@@ -30,11 +33,15 @@ async function request<T>(
   return data as T
 }
 
-export const getMeetings = (): Promise<MeetingRow[]> =>
-  request("GET", "/api/meetings")
+export const getMeetings = (projectFilter?: "none" | number): Promise<MeetingRow[]> => {
+  if (projectFilter === undefined) return request("GET", "/api/meetings")
+  return request("GET", `/api/meetings?project_id=${projectFilter}`)
+}
 
-export const search = (q: string): Promise<SearchResult[]> =>
-  request("GET", `/api/search?q=${encodeURIComponent(q)}`)
+export const search = (q: string, projectId?: "none" | number): Promise<SearchResult[]> => {
+  const base = `/api/search?q=${encodeURIComponent(q)}`
+  return request("GET", projectId !== undefined ? `${base}&project_id=${projectId}` : base)
+}
 
 export const getMeeting = (id: number): Promise<MeetingDetail> =>
   request("GET", `/api/meetings/${id}`)
@@ -135,21 +142,48 @@ export const anthropicDisconnect = (): Promise<{ ok: true }> =>
 
 export const updateActionItem = (
   id: number,
-  patch: Partial<{ what: string; where: string | null; details: string | null; requested_by: string | null; priority: ActionItem["priority"]; status: ActionItem["status"]; due: string | null }>,
+  patch: Partial<{
+    what: string
+    where: string | null
+    details: string | null
+    requested_by: string | null
+    assigned_to: string[] | null
+    priority: ActionItem["priority"]
+    status: ActionItem["status"]
+    due: string | null
+  }>,
 ): Promise<{ ok: true }> =>
   request("PATCH", `/api/action-items/${id}`, patch)
 
 export const addActionItem = (
   meetingId: number,
-  item: { what: string; where?: string | null; details?: string | null; requested_by?: string | null; priority?: ActionItem["priority"] },
+  item: {
+    what: string
+    where?: string | null
+    details?: string | null
+    requested_by?: string | null
+    assigned_to?: string[] | null
+    priority?: ActionItem["priority"]
+  },
 ): Promise<{ id: number }> =>
   request("POST", `/api/meetings/${meetingId}/action-items`, item)
 
 export const deleteActionItem = (id: number): Promise<void> =>
   request("DELETE", `/api/action-items/${id}`)
 
-export const getTasks = (status = "aberto"): Promise<Task[]> =>
-  request("GET", `/api/tasks?status=${encodeURIComponent(status)}`)
+export const getTasks = (
+  status = "aberto",
+  projectId?: "none" | number,
+  scope?: "personal" | "delegated" | "all",
+): Promise<Task[]> => {
+  const params = new URLSearchParams({ status })
+  if (projectId !== undefined) params.set("project_id", String(projectId))
+  if (scope) params.set("scope", scope)
+  return request("GET", `/api/tasks?${params.toString()}`)
+}
+
+export const exportContext = (body: ContextExportRequest): Promise<ContextExportResponse> =>
+  request("POST", "/api/context/export", body)
 
 export const updateTurn = (
   meetingId: number,
@@ -188,3 +222,37 @@ export const testConnection = (
   target: string,
 ): Promise<{ ok: boolean; detail: string }> =>
   request("POST", "/api/settings/test", { target })
+
+export const getProjects = (): Promise<Project[]> =>
+  request("GET", "/api/projects")
+
+export const getProject = (id: number): Promise<Project> =>
+  request("GET", `/api/projects/${id}`)
+
+export const createProject = (body: {
+  name: string
+  description?: string
+  repo_path?: string
+}): Promise<Project> =>
+  request("POST", "/api/projects", body)
+
+export const updateProject = (
+  id: number,
+  body: { name?: string; description?: string; repo_path?: string },
+): Promise<Project> =>
+  request("PATCH", `/api/projects/${id}`, body)
+
+export const deleteProject = (id: number): Promise<void> =>
+  request("DELETE", `/api/projects/${id}`)
+
+export const setMeetingProject = (
+  id: number,
+  projectId: number | null,
+): Promise<{ ok: true }> =>
+  request("PATCH", `/api/meetings/${id}`, { project_id: projectId })
+
+export const bulkMoveProject = (
+  ids: number[],
+  projectId: number | null,
+): Promise<{ updated: number }> =>
+  request("PATCH", "/api/meetings/bulk-project", { ids, project_id: projectId })

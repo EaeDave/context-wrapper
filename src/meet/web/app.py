@@ -8,7 +8,7 @@ import mimetypes
 import re
 import time
 from pathlib import Path
-from typing import Annotated, AsyncGenerator
+from typing import Annotated, AsyncGenerator, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
@@ -120,8 +120,8 @@ def _highlight_snippet(raw: str) -> str:
 
 
 class PatchMeetingBody(BaseModel):
-    title: str
-
+    title: str | None = None
+    project_id: int | None = None  # usar model_fields_set p/ distinguir "ausente" de "null"
 
 class RelinkBody(BaseModel):
     path: str
@@ -141,11 +141,28 @@ class ProcessBody(BaseModel):
     no_llm: bool = False
     import_media: bool = True
     num_speakers: int = 0
+    project_id: int | None = None
 
 
 class BulkDeleteBody(BaseModel):
     ids: list[int]
 
+
+class BulkProjectBody(BaseModel):
+    ids: list[int]
+    project_id: int | None = None  # None = desassociar
+
+
+class CreateProjectBody(BaseModel):
+    name: str
+    description: str = ""
+    repo_path: str = ""
+
+
+class PatchProjectBody(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    repo_path: str | None = None
 
 class HFTokenBody(BaseModel):
     token: str
@@ -166,9 +183,15 @@ class PatchActionItemBody(BaseModel):
     where: str | None = None
     details: str | None = None
     requested_by: str | None = None
-    priority: str | None = None
-    status: str | None = None
+    priority: Literal["alta", "media", "baixa"] | None = None
+    status: Literal["aberto", "feito"] | None = None
     due: str | None = None
+    assigned_to: list[str] | None = None
+    source_start: float | None = None
+    source_end: float | None = None
+    evidence_quote: str | None = None
+    explicitness: Literal["explicit", "inferred"] | None = None
+    review_status: Literal["confirmed", "needs_review"] | None = None
 
 
 class AddActionItemBody(BaseModel):
@@ -176,8 +199,13 @@ class AddActionItemBody(BaseModel):
     where: str | None = None
     details: str | None = None
     requested_by: str | None = None
-    priority: str = "media"
-
+    priority: Literal["alta", "media", "baixa"] = "media"
+    assigned_to: list[str] | None = None
+    source_start: float | None = None
+    source_end: float | None = None
+    evidence_quote: str | None = None
+    explicitness: Literal["explicit", "inferred"] = "inferred"
+    review_status: Literal["confirmed", "needs_review"] = "needs_review"
 
 class PatchTurnBody(BaseModel):
     seg_ids: list[int]
@@ -208,6 +236,16 @@ class TuningBody(BaseModel):
 class TestConnectionBody(BaseModel):
     target: str
 
+
+class ContextExportBody(BaseModel):
+    task_ids: list[int]
+    objective: str = ""
+    format: Literal["markdown", "json"] = "markdown"
+    include_summary: bool = True
+    include_facts: bool = True
+    include_evidence: bool = True
+    include_transcript: bool = False
+
 # Verifiers PKCE pendentes: {state → verifier}. Limpo após uso, max 5 entradas.
 _pending_verifiers: dict[str, str] = {}
 _MAX_PENDING = 5
@@ -221,10 +259,21 @@ def create_app() -> FastAPI:
 
     # ── Meetings ──────────────────────────────────────────────────────────────
 
+    def _parse_project_filter(project_id: str | None) -> "int | str | None":
+        if project_id is None:
+            return None
+        if project_id.lower() == "none":
+            return "none"
+        try:
+            return int(project_id)
+        except ValueError:
+            raise HTTPException(400, f"project_id inválido: {project_id!r}")
+
     @app.get("/api/meetings")
-    def api_list_meetings() -> list[dict]:
+    def api_list_meetings(project_id: str | None = None) -> list[dict]:
         _, store = _settings_store()
-        rows = store.list_meeting_rows()
+        pf = _parse_project_filter(project_id)
+        rows = store.list_meeting_rows(project_filter=pf)
         return [
             {
                 "id": r.id,
@@ -235,16 +284,19 @@ def create_app() -> FastAPI:
                 "media_managed": r.media_managed,
                 "media_ok": r.media_ok,
                 "duration": r.duration,
+                "project_id": r.project_id,
+                "project_name": r.project_name,
             }
             for r in rows
         ]
 
     @app.get("/api/search")
-    def api_search(q: str = "") -> list[dict]:
+    def api_search(q: str = "", project_id: str | None = None) -> list[dict]:
         if not q.strip():
             return []
         _, store = _settings_store()
-        results = store.search(q, limit=30)
+        pf = _parse_project_filter(project_id)
+        results = store.search(q, limit=30, project_filter=pf)
         return [
             {
                 "meeting_id": int(r["meeting_id"]),
@@ -255,6 +307,19 @@ def create_app() -> FastAPI:
             }
             for r in results
         ]
+
+    # Registrar bulk-project e bulk-delete ANTES de /{meeting_id} para evitar conflito de rota
+    @app.patch("/api/meetings/bulk-project")
+    def api_bulk_project(body: BulkProjectBody) -> dict:
+        clean = sorted({i for i in body.ids if i > 0})
+        if not clean:
+            raise HTTPException(400, "Nenhuma reunião selecionada")
+        _, store = _settings_store()
+        try:
+            count = store.bulk_set_meeting_project(clean, body.project_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"updated": count}
 
     # Registrar bulk-delete ANTES de /{meeting_id} para evitar conflito de rota
     @app.post("/api/meetings/bulk-delete")
@@ -313,6 +378,7 @@ def create_app() -> FastAPI:
         media_managed = bool(getattr(result, "media_managed", False))
         source_origin = getattr(result, "source_origin", result.source) or result.source
         md_path = getattr(result, "md_path", None)
+        project = store.get_project(result.project_id) if result.project_id is not None else None
 
         return {
             "id": meeting_id,
@@ -344,27 +410,61 @@ def create_app() -> FastAPI:
                     "priority": ai.priority,
                     "status": ai.status,
                     "due": ai.due,
+                    "assigned_to": ai.assigned_to,
+                    "source_start": ai.source_start,
+                    "source_end": ai.source_end,
+                    "evidence_quote": ai.evidence_quote,
+                    "explicitness": ai.explicitness,
+                    "review_status": ai.review_status,
                 }
                 for ai in result.action_items
+            ],
+            "facts": [
+                {
+                    "id": f.id,
+                    "kind": f.kind,
+                    "text": f.text,
+                    "source_start": f.source_start,
+                    "source_end": f.source_end,
+                    "evidence_quote": f.evidence_quote,
+                    "explicitness": f.explicitness,
+                    "review_status": f.review_status,
+                }
+                for f in result.facts
             ],
             "pending": pending,
             "groups": groups,
             "speaker_matches": result.speaker_matches,
+            "project_id": result.project_id,
+            "project_name": project.name if project else None,
         }
 
     @app.patch("/api/meetings/{meeting_id}")
     def api_patch_meeting(meeting_id: int, body: PatchMeetingBody) -> dict:
         from .. import render as render_mod
 
-        if not body.title.strip():
-            raise HTTPException(400, "Título vazio")
+        has_title = body.title is not None
+        has_project = "project_id" in body.model_fields_set
+        if not has_title and not has_project:
+            raise HTTPException(400, "Forneça title ou project_id")
         settings, store = _settings_store()
-        try:
-            ok = store.update_title(meeting_id, body.title)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        if not ok:
-            raise HTTPException(404, "Reunião não encontrada")
+        if has_title:
+            t = (body.title or "").strip()
+            if not t:
+                raise HTTPException(400, "Título vazio")
+            try:
+                ok = store.update_title(meeting_id, t)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            if not ok:
+                raise HTTPException(404, "Reunião não encontrada")
+        if has_project:
+            try:
+                ok = store.set_meeting_project(meeting_id, body.project_id)
+            except ValueError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            if not ok:
+                raise HTTPException(404, "Reunião não encontrada")
         result = store.get_meeting(meeting_id)
         if result is not None:
             md_path = getattr(result, "md_path", None)
@@ -436,12 +536,11 @@ def create_app() -> FastAPI:
         job = manager.submit(kind="mix", label=f"mix · {path.name}", video=str(path))
         return _serialize_job(job)
 
-    # ── Action items ──────────────────────────────────────────────────────────
 
     @app.patch("/api/action-items/{item_id}")
     def api_patch_action_item(item_id: int, body: PatchActionItemBody) -> dict:
         _, store = _settings_store()
-        fields = {k: v for k, v in body.model_dump().items() if v is not None}
+        fields = body.model_dump(exclude_unset=True)
         if not store.update_action_item(item_id, fields):
             raise HTTPException(404, "Action item não encontrado")
         return {"ok": True}
@@ -461,6 +560,12 @@ def create_app() -> FastAPI:
             details=body.details,
             requested_by=body.requested_by,
             priority=body.priority,
+            assigned_to=body.assigned_to,
+            source_start=body.source_start,
+            source_end=body.source_end,
+            evidence_quote=body.evidence_quote,
+            explicitness=body.explicitness,
+            review_status=body.review_status,
         )
         new_id = store.add_action_item(meeting_id, item)
         return {"id": new_id}
@@ -472,11 +577,18 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Action item não encontrado")
 
     @app.get("/api/tasks")
-    def api_tasks(status: str = "aberto") -> list[dict]:
+    def api_tasks(
+        status: str = "aberto",
+        project_id: str | None = None,
+        scope: str = "personal",
+    ) -> list[dict]:
         if status not in {"aberto", "feito", "todos"}:
             raise HTTPException(400, "status deve ser aberto|feito|todos")
+        if scope not in {"personal", "delegated", "all"}:
+            raise HTTPException(400, "scope deve ser personal|delegated|all")
         _, store = _settings_store()
-        return store.list_tasks(status)
+        pf = _parse_project_filter(project_id)
+        return store.list_tasks(status, project_filter=pf, scope=scope)
 
     # ── Editar turno do transcript ────────────────────────────────────────────
 
@@ -533,6 +645,10 @@ def create_app() -> FastAPI:
         path = Path(body.video).expanduser()
         if not path.is_file():
             raise HTTPException(400, f"Arquivo inválido: {body.video}")
+        if body.project_id is not None:
+            _, store = _settings_store()
+            if store.get_project(body.project_id) is None:
+                raise HTTPException(404, "Projeto não encontrado")
         job = manager.submit(
             kind="process",
             label=path.name,
@@ -543,8 +659,79 @@ def create_app() -> FastAPI:
             no_llm=body.no_llm,
             import_media=body.import_media,
             num_speakers=body.num_speakers,
+            project_id=body.project_id,
         )
         return _serialize_job(job)
+
+    # ── Projetos ──────────────────────────────────────────────────────────────
+
+    def _project_to_dict(p) -> dict:  # p: ProjectRow
+        return {
+            "id": p.id,
+            "name": p.name,
+            "description": p.description,
+            "repo_path": p.repo_path,
+            "meeting_count": p.meeting_count,
+            "open_task_count": p.open_task_count,
+            "done_task_count": p.done_task_count,
+            "last_meeting_date": p.last_meeting_date,
+            "created_at": p.created_at,
+            "updated_at": p.updated_at,
+        }
+
+    @app.get("/api/projects")
+    def api_list_projects() -> list[dict]:
+        _, store = _settings_store()
+        return [_project_to_dict(p) for p in store.list_projects()]
+
+    @app.post("/api/projects", status_code=201)
+    def api_create_project(body: CreateProjectBody) -> dict:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(400, "Nome do projeto não pode ser vazio")
+        _, store = _settings_store()
+        try:
+            pid = store.create_project(name, body.description, body.repo_path)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        proj = store.get_project(pid)
+        assert proj is not None
+        return _project_to_dict(proj)
+
+    @app.get("/api/projects/{project_id}")
+    def api_get_project(project_id: int) -> dict:
+        _, store = _settings_store()
+        proj = store.get_project(project_id)
+        if proj is None:
+            raise HTTPException(404, "Projeto não encontrado")
+        return _project_to_dict(proj)
+
+    @app.patch("/api/projects/{project_id}")
+    def api_patch_project(project_id: int, body: PatchProjectBody) -> dict:
+        if body.name is None and body.description is None and body.repo_path is None:
+            raise HTTPException(400, "Forneça pelo menos um campo para atualizar")
+        _, store = _settings_store()
+        try:
+            ok = store.update_project(
+                project_id,
+                name=body.name,
+                description=body.description,
+                repo_path=body.repo_path,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if not ok:
+            raise HTTPException(404, "Projeto não encontrado")
+        proj = store.get_project(project_id)
+        assert proj is not None
+        return _project_to_dict(proj)
+
+    @app.delete("/api/projects/{project_id}", status_code=204)
+    def api_delete_project(project_id: int) -> None:
+        _, store = _settings_store()
+        if not store.delete_project(project_id):
+            raise HTTPException(404, "Projeto não encontrado")
+
 
     # ── Jobs ──────────────────────────────────────────────────────────────────
 
@@ -1034,6 +1221,28 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     # ── SPA (REGISTRAR POR ÚLTIMO) ────────────────────────────────────────────
+
+    # ── Context export ────────────────────────────────────────────────────────
+
+    @app.post("/api/context/export")
+    def api_context_export(body: ContextExportBody) -> dict:
+        if not body.task_ids:
+            raise HTTPException(400, "task_ids não pode ser vazio")
+        _, store = _settings_store()
+        from ..context_export import build_export_package
+        try:
+            return build_export_package(
+                store=store,
+                task_ids=body.task_ids,
+                objective=body.objective,
+                fmt=body.format,
+                include_summary=body.include_summary,
+                include_facts=body.include_facts,
+                include_evidence=body.include_evidence,
+                include_transcript=body.include_transcript,
+            )
+        except KeyError as exc:
+            raise HTTPException(404, f"ID não encontrado: {exc}") from exc
 
     # /assets/ servido com StaticFiles se o build existir
     assets_dir = DIST_DIR / "assets"

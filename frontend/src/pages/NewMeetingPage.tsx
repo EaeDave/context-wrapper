@@ -72,6 +72,7 @@ export default function NewMeetingPage() {
 
   // Form state
   const [title, setTitle] = useState("")
+  const [selectedProjectId, setSelectedProjectId] = useState<string>("none")
   const [micTrack, setMicTrack] = useState("1")
   const [othersTrack, setOthersTrack] = useState("2")
   const [numSpeakers, setNumSpeakers] = useState("")
@@ -94,6 +95,12 @@ export default function NewMeetingPage() {
   })
   const singleTrack = probeInfo != null && probeInfo.audio_streams < 2
 
+  const { data: projects = [] } = useQuery({
+    queryKey: ["projects"],
+    queryFn: api.getProjects,
+    staleTime: 30_000,
+  })
+
   const { mutate: startProcess, isPending } = useMutation({
     mutationFn: () =>
       api.startProcess({
@@ -104,6 +111,8 @@ export default function NewMeetingPage() {
         num_speakers: numSpeakers.trim() ? Number(numSpeakers) : 0,
         import_media: importMedia,
         no_llm: noLlm,
+        project_id:
+          selectedProjectId === "none" ? undefined : Number(selectedProjectId),
       }),
     onSuccess: (job) => {
       toast.success("Processamento iniciado")
@@ -118,27 +127,32 @@ export default function NewMeetingPage() {
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8">
-      <h1 className="text-2xl font-semibold tracking-tight mb-6">Nova reunião</h1>
+      <h1 className="mb-6 text-2xl font-semibold tracking-tight">
+        Nova reunião
+      </h1>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+      <div className="grid grid-cols-1 items-start gap-6 md:grid-cols-2">
         {/* ── File Browser ── */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base font-medium">Selecionar arquivo</CardTitle>
+            <CardTitle className="text-base font-medium">
+              Selecionar arquivo
+            </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
             {/* Quick dirs */}
             {browse?.quick.length ? (
               <div className="flex flex-wrap gap-1.5">
                 {browse.quick.map((qPath) => {
-                  const name = qPath.split("/").filter(Boolean).pop() ?? qPath
+                  const name =
+                    qPath.split("/").filter(Boolean).pop() ?? qPath
                   const isHome = !(name in NAMED_DIRS)
                   return (
                     <Button
                       key={qPath}
                       variant="outline"
                       size="sm"
-                      className="h-7 text-xs gap-1.5"
+                      className="h-7 gap-1.5 text-xs"
                       onClick={() => setCurrentPath(qPath)}
                     >
                       {isHome ? (
@@ -154,7 +168,7 @@ export default function NewMeetingPage() {
             ) : null}
 
             {/* Breadcrumb + parent button */}
-            <div className="flex items-center gap-1 min-w-0">
+            <div className="flex min-w-0 items-center gap-1">
               {browse?.parent != null && (
                 <Button
                   variant="ghost"
@@ -166,20 +180,24 @@ export default function NewMeetingPage() {
                   <ArrowUp className="size-4" />
                 </Button>
               )}
-              <div className="flex items-center gap-0.5 overflow-x-auto text-xs text-muted-foreground min-w-0 flex-1">
+              <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto text-xs text-muted-foreground">
                 <button
-                  className="hover:text-foreground shrink-0"
+                  className="shrink-0 hover:text-foreground"
                   onClick={() => setCurrentPath("/")}
                 >
                   /
                 </button>
                 {breadcrumbs.map((crumb, i) => (
-                  <span key={crumb.path} className="flex items-center gap-0.5 shrink-0">
+                  <span
+                    key={crumb.path}
+                    className="flex shrink-0 items-center gap-0.5"
+                  >
                     <ChevronRight className="size-3 opacity-40" />
                     <button
                       className={cn(
-                        "hover:text-foreground max-w-[120px] truncate",
-                        i === breadcrumbs.length - 1 && "text-foreground font-medium",
+                        "max-w-[120px] truncate hover:text-foreground",
+                        i === breadcrumbs.length - 1 &&
+                          "font-medium text-foreground",
                       )}
                       onClick={() => setCurrentPath(crumb.path)}
                     >
@@ -209,18 +227,19 @@ export default function NewMeetingPage() {
                     const isDir = entry.kind === "dir"
                     const isSelected = !isDir && entry.path === selectedFile
                     const ext = extOf(entry.name)
-                    const FileIcon = ext in AUDIO_EXTS ? FileAudio : FileVideo
+                    const FileIcon =
+                      ext in AUDIO_EXTS ? FileAudio : FileVideo
 
                     return (
                       <button
                         key={entry.path}
                         className={cn(
-                          "w-full flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm text-left transition-colors",
+                          "flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
                           isDir
-                            ? "hover:bg-accent/60 text-foreground"
-                            : "hover:bg-accent/40 text-foreground",
+                            ? "text-foreground hover:bg-accent/60"
+                            : "text-foreground hover:bg-accent/40",
                           isSelected &&
-                            "ring-1 ring-primary bg-primary/5 hover:bg-primary/8",
+                            "bg-primary/5 ring-1 ring-primary hover:bg-primary/8",
                         )}
                         onClick={() => {
                           if (isDir) {
@@ -231,13 +250,13 @@ export default function NewMeetingPage() {
                         }}
                       >
                         {isDir ? (
-                          <Folder className="size-4 text-muted-foreground shrink-0" />
+                          <Folder className="size-4 shrink-0 text-muted-foreground" />
                         ) : (
-                          <FileIcon className="size-4 text-muted-foreground shrink-0" />
+                          <FileIcon className="size-4 shrink-0 text-muted-foreground" />
                         )}
                         <span className="flex-1 truncate">{entry.name}</span>
                         {!isDir && entry.size != null && (
-                          <span className="text-xs text-muted-foreground shrink-0">
+                          <span className="shrink-0 text-xs text-muted-foreground">
                             {formatSize(entry.size)}
                           </span>
                         )}
@@ -275,9 +294,10 @@ export default function NewMeetingPage() {
                   {probeInfo.audio_streams === 1
                     ? "só 1 faixa de áudio"
                     : "0 faixas de áudio"}
-                  {" "}— a separação mic/outros não vai funcionar. Falantes
-                  serão detectados só por voz (você pode virar um SPEAKER_XX).
-                  Prefira o .mkv multi-track do OBS.
+                  {" "}
+                  — a separação mic/outros não vai funcionar. Falantes serão
+                  detectados só por voz (você pode virar um SPEAKER_XX). Prefira
+                  o .mkv multi-track do OBS.
                 </span>
               </div>
             )}
@@ -291,6 +311,27 @@ export default function NewMeetingPage() {
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="automático pelo nome do arquivo"
               />
+            </div>
+
+            {/* Project */}
+            <div className="space-y-1.5">
+              <Label htmlFor="project-select">Projeto</Label>
+              <Select
+                value={selectedProjectId}
+                onValueChange={setSelectedProjectId}
+              >
+                <SelectTrigger id="project-select">
+                  <SelectValue placeholder="Sem projeto" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Sem projeto</SelectItem>
+                  {projects.map((p) => (
+                    <SelectItem key={p.id} value={String(p.id)}>
+                      {p.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
 
             {/* Tracks */}
@@ -329,7 +370,9 @@ export default function NewMeetingPage() {
 
             {/* Num speakers */}
             <div className="space-y-1.5">
-              <Label htmlFor="num-speakers">Falantes remotos (fora você)</Label>
+              <Label htmlFor="num-speakers">
+                Falantes remotos (fora você)
+              </Label>
               <Input
                 id="num-speakers"
                 type="number"
@@ -339,7 +382,8 @@ export default function NewMeetingPage() {
                 onChange={(e) => setNumSpeakers(e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                Nº de participantes remotos na track "outros". Deixe vazio para detecção automática.
+                Nº de participantes remotos na track "outros". Deixe vazio
+                para detecção automática.
               </p>
             </div>
 
@@ -351,7 +395,10 @@ export default function NewMeetingPage() {
                   checked={importMedia}
                   onCheckedChange={(v) => setImportMedia(v === true)}
                 />
-                <Label htmlFor="import-media" className="font-normal cursor-pointer">
+                <Label
+                  htmlFor="import-media"
+                  className="cursor-pointer font-normal"
+                >
                   Importar mídia p/ acervo
                 </Label>
               </div>
@@ -361,7 +408,10 @@ export default function NewMeetingPage() {
                   checked={noLlm}
                   onCheckedChange={(v) => setNoLlm(v === true)}
                 />
-                <Label htmlFor="no-llm" className="font-normal cursor-pointer">
+                <Label
+                  htmlFor="no-llm"
+                  className="cursor-pointer font-normal"
+                >
                   Sem LLM (só transcrição)
                 </Label>
               </div>

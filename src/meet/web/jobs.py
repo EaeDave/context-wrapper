@@ -332,6 +332,7 @@ class JobManager:
                 import_media=bool(job.params.get("import_media", True)),
                 num_speakers=int(job.params.get("num_speakers", 0)),
                 on_progress=progress,
+                project_id=job.params.get("project_id") or None,
             )
             with self._lock:
                 job.meeting_id = meeting_id

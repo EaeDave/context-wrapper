@@ -9,6 +9,8 @@ import MeetingDetailPage from "@/pages/MeetingDetailPage"
 import SpeakersPage from "@/pages/SpeakersPage"
 import SettingsPage from "@/pages/SettingsPage"
 import TasksPage from "@/pages/TasksPage"
+import ProjectsPage from "@/pages/ProjectsPage"
+import ProjectDetailPage from "@/pages/ProjectDetailPage"
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -32,6 +34,8 @@ export default function App() {
             <Route path="speakers" element={<SpeakersPage />} />
             <Route path="settings" element={<SettingsPage />} />
             <Route path="tasks" element={<TasksPage />} />
+            <Route path="projects" element={<ProjectsPage />} />
+            <Route path="projects/:id" element={<ProjectDetailPage />} />
           </Route>
         </Routes>
       </BrowserRouter>

@@ -5,7 +5,9 @@
 
 ## Current business rule map
 
-- Pipeline, extração LLM por blocos em reuniões longas e responsabilidade pessoal dos action items → `README.md#regras-do-produto`, `src/meet/pipeline.py`, `src/meet/extract.py`, `tests/test_extract.py`; **jobs internos:** `process`, `reprocess`, `reextract`.
+- Pipeline, extração LLM por blocos, rastreabilidade de fatos/tarefas e responsabilidade pessoal → `README.md#regras-do-produto`, `src/meet/pipeline.py`, `src/meet/extract.py`, `tests/test_extract.py`, `tests/test_traceable.py`; **jobs internos:** `process`, `reprocess`, `reextract`.
+- Projects Hub, associação de reuniões e filtros por projeto → `README.md#regras-do-produto`, `src/meet/store.py`, `src/meet/web/app.py`, `tests/test_projects.py`; **endpoints internos:** `/api/projects/*`, `/api/meetings/*`.
+- Task Studio, escopos pessoal/delegado e pacote canônico para outra LLM → `README.md#regras-do-produto`, `src/meet/store.py`, `src/meet/context_export.py`, `tests/test_context_export.py`; **endpoints internos:** `GET /api/tasks`, `POST /api/context/export`.
 - Job lifecycle, structured progress, and interruption recovery → `README.md#regras-do-produto`, `src/meet/progress.py`, `src/meet/web/jobs.py`, `tests/test_progress.py`, `tests/test_jobs.py`; **endpoints internos:** `/api/jobs/*`.
 - Claude OAuth connection lifecycle → `README.md#regras-do-produto`, `src/meet/anthropic_oauth.py`, `tests/test_settings_local.py`; **endpoints internos:** `/api/auth/anthropic/*`.
 

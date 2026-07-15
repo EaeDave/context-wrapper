@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react"
 import { NavLink, Outlet } from "react-router"
-import { Search, Settings, ListTodo } from "lucide-react"
+import { Search, Settings, ListTodo, FolderKanban } from "lucide-react"
 import { Toaster } from "@/components/ui/sonner"
 import { cn } from "@/lib/utils"
 import SearchCommand from "@/components/search-command"
@@ -8,6 +8,7 @@ import SearchCommand from "@/components/search-command"
 const NAV: { to: string; label: string; end?: boolean; icon?: React.FC<{ className?: string }> }[] = [
   { to: "/", label: "Reuniões", end: true },
   { to: "/tasks", label: "Tarefas", icon: ListTodo },
+  { to: "/projects", label: "Projetos", icon: FolderKanban },
   { to: "/new", label: "Nova reunião" },
   { to: "/speakers", label: "Vozes" },
 ]

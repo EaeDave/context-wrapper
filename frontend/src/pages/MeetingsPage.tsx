@@ -1,11 +1,20 @@
 import { useState, useEffect } from "react"
-import { Link, useNavigate } from "react-router"
+import { Link, useNavigate, useSearchParams } from "react-router"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
-import { Plus, Search, Trash2, Calendar } from "lucide-react"
+import {
+  Plus,
+  Search,
+  Trash2,
+  Calendar,
+  FolderKanban,
+  FolderX,
+  MoveRight,
+} from "lucide-react"
 
 import * as api from "@/lib/api"
 import { formatDuration } from "@/lib/format"
+import { cn } from "@/lib/utils"
 import type { Job, MeetingRow } from "@/lib/types"
 
 import { Button } from "@/components/ui/button"
@@ -34,6 +43,20 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 
 // ── Job status badge ─────────────────────────────────────────────────────────
 
@@ -43,7 +66,7 @@ function JobStatusBadge({ status }: { status: Job["status"] }) {
   if (status === "running")
     return (
       <Badge variant="default" className="gap-1.5">
-        <span className="size-1.5 shrink-0 rounded-full bg-primary-foreground animate-pulse" />
+        <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-primary-foreground" />
         executando
       </Badge>
     )
@@ -66,10 +89,7 @@ function MediaBadges({ row }: { row: MeetingRow }) {
           vídeo
         </Badge>
       ) : (
-        <Badge
-          variant="outline"
-          className="border-destructive text-destructive"
-        >
+        <Badge variant="outline" className="border-destructive text-destructive">
           sem mídia
         </Badge>
       )}
@@ -86,9 +106,13 @@ function MediaBadges({ row }: { row: MeetingRow }) {
 
 export default function MeetingsPage() {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const qc = useQueryClient()
 
-  // Inline search
+  // URL-based project filter: null = all, "none" = sem projeto, "123" = project id
+  const projectIdParam = searchParams.get("project_id")
+
+  // Inline search (local state)
   const [searchInput, setSearchInput] = useState("")
   const [debouncedSearch, setDebouncedSearch] = useState("")
 
@@ -100,11 +124,23 @@ export default function MeetingsPage() {
   // Row selection
   const [selected, setSelected] = useState<Set<number>>(new Set())
 
+  // Bulk move dialog
+  const [bulkMoveOpen, setBulkMoveOpen] = useState(false)
+  const [bulkMoveProjectId, setBulkMoveProjectId] = useState<string>("none")
+
   // ── Queries ─────────────────────────────────────────────────────────────
 
+  // Resolve URL param → api filter value
+  const apiFilter =
+    projectIdParam === null
+      ? undefined
+      : projectIdParam === "none"
+        ? ("none" as const)
+        : Number(projectIdParam)
+
   const meetingsQuery = useQuery({
-    queryKey: ["meetings"],
-    queryFn: api.getMeetings,
+    queryKey: ["meetings", projectIdParam ?? "all"],
+    queryFn: () => api.getMeetings(apiFilter),
   })
 
   const jobsQuery = useQuery({
@@ -114,12 +150,17 @@ export default function MeetingsPage() {
   })
 
   const searchResultsQuery = useQuery({
-    queryKey: ["search", debouncedSearch],
-    queryFn: () => api.search(debouncedSearch),
+    queryKey: ["search", debouncedSearch, projectIdParam ?? "all"],
+    queryFn: () => api.search(debouncedSearch, apiFilter),
     enabled: debouncedSearch.trim().length > 0,
   })
 
-  // ── Bulk delete ──────────────────────────────────────────────────────────
+  const projectsQuery = useQuery({
+    queryKey: ["projects"],
+    queryFn: api.getProjects,
+  })
+
+  // ── Mutations ────────────────────────────────────────────────────────────
 
   const bulkDeleteMutation = useMutation({
     mutationFn: (ids: number[]) => api.bulkDelete(ids),
@@ -128,15 +169,27 @@ export default function MeetingsPage() {
       setSelected(new Set())
       toast.success(`${data.deleted} reunião(ões) excluída(s)`)
     },
-    onError: (err: Error) => {
-      toast.error(err.message || "Erro ao excluir reuniões")
+    onError: (err: Error) => toast.error(err.message || "Erro ao excluir reuniões"),
+  })
+
+  const bulkMoveMutation = useMutation({
+    mutationFn: ({ ids, projectId }: { ids: number[]; projectId: number | null }) =>
+      api.bulkMoveProject(ids, projectId),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["meetings"] })
+      qc.invalidateQueries({ queryKey: ["projects"] })
+      setSelected(new Set())
+      setBulkMoveOpen(false)
+      toast.success(`${data.updated} reunião(ões) atualizada(s)`)
     },
+    onError: (err: Error) => toast.error(err.message || "Erro ao mover reuniões"),
   })
 
   // ── Derived state ────────────────────────────────────────────────────────
 
   const meetings = meetingsQuery.data ?? []
   const jobs = jobsQuery.data ?? []
+  const projects = projectsQuery.data ?? []
   const searchActive = debouncedSearch.trim().length > 0
 
   const allIds = meetings.map((m) => m.id)
@@ -146,11 +199,8 @@ export default function MeetingsPage() {
   const selectedIds = Array.from(selected)
 
   function toggleAll() {
-    if (allSelected) {
-      setSelected(new Set())
-    } else {
-      setSelected(new Set(allIds))
-    }
+    if (allSelected) setSelected(new Set())
+    else setSelected(new Set(allIds))
   }
 
   function toggleOne(id: number) {
@@ -162,21 +212,40 @@ export default function MeetingsPage() {
     })
   }
 
+  function setProjectFilter(value: string | null) {
+    setSelected(new Set())
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev)
+        if (value !== null) next.set("project_id", value)
+        else next.delete("project_id")
+        return next
+      },
+      { replace: true },
+    )
+  }
+
+  function handleBulkMove() {
+    const projectId =
+      bulkMoveProjectId === "none" ? null : Number(bulkMoveProjectId)
+    bulkMoveMutation.mutate({ ids: selectedIds, projectId })
+  }
+
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8">
       {/* Header */}
-      <div className="mb-6 flex items-center gap-3">
+      <div className="mb-4 flex items-center gap-3">
         <h1 className="text-2xl font-semibold tracking-tight">Reuniões</h1>
         <div className="ml-auto flex items-center gap-2">
           <div className="relative">
-            <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground pointer-events-none" />
+            <Search className="pointer-events-none absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
             <Input
               placeholder="Buscar..."
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
-              className="pl-8 w-52"
+              className="w-52 pl-8"
             />
           </div>
           <Button asChild>
@@ -186,6 +255,51 @@ export default function MeetingsPage() {
             </Link>
           </Button>
         </div>
+      </div>
+
+      {/* Project filter tabs */}
+      <div className="mb-6 flex flex-wrap items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => setProjectFilter(null)}
+          className={cn(
+            "rounded-md border px-3 py-1.5 text-sm font-medium transition-colors",
+            projectIdParam === null
+              ? "border-primary/30 bg-primary/10 text-primary"
+              : "border-input bg-background text-muted-foreground hover:bg-accent/10 hover:text-foreground",
+          )}
+        >
+          Todos
+        </button>
+        <button
+          type="button"
+          onClick={() => setProjectFilter("none")}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium transition-colors",
+            projectIdParam === "none"
+              ? "border-primary/30 bg-primary/10 text-primary"
+              : "border-input bg-background text-muted-foreground hover:bg-accent/10 hover:text-foreground",
+          )}
+        >
+          <FolderX className="size-3.5" />
+          Sem projeto
+        </button>
+        {projects.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            onClick={() => setProjectFilter(String(p.id))}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium transition-colors",
+              projectIdParam === String(p.id)
+                ? "border-primary/30 bg-primary/10 text-primary"
+                : "border-input bg-background text-muted-foreground hover:bg-accent/10 hover:text-foreground",
+            )}
+          >
+            <FolderKanban className="size-3.5" />
+            {p.name}
+          </button>
+        ))}
       </div>
 
       {/* Jobs strip */}
@@ -264,9 +378,7 @@ export default function MeetingsPage() {
                         variant="outline"
                         className="mt-0.5 shrink-0 text-xs"
                       >
-                        {r.kind === "action_item"
-                          ? "action item"
-                          : "transcrição"}
+                        {r.kind === "action_item" ? "action item" : "transcrição"}
                       </Badge>
                       <div className="min-w-0">
                         <p className="mb-0.5 text-xs text-muted-foreground">
@@ -299,13 +411,21 @@ export default function MeetingsPage() {
         <Card>
           <CardContent className="flex flex-col items-center justify-center gap-4 py-16">
             <Calendar className="size-12 text-muted-foreground" />
-            <p className="text-muted-foreground">Nenhuma reunião ainda.</p>
-            <Button asChild>
-              <Link to="/new">
-                <Plus className="size-4" />
-                Nova reunião
-              </Link>
-            </Button>
+            <p className="text-muted-foreground">
+              {projectIdParam === "none"
+                ? "Nenhuma reunião sem projeto."
+                : projectIdParam
+                  ? "Nenhuma reunião neste projeto."
+                  : "Nenhuma reunião ainda."}
+            </p>
+            {!projectIdParam && (
+              <Button asChild>
+                <Link to="/new">
+                  <Plus className="size-4" />
+                  Nova reunião
+                </Link>
+              </Button>
+            )}
           </CardContent>
         </Card>
       ) : (
@@ -322,7 +442,8 @@ export default function MeetingsPage() {
                     />
                   </TableHead>
                   <TableHead>Título</TableHead>
-                  <TableHead className="w-44">Data</TableHead>
+                  <TableHead className="w-36">Projeto</TableHead>
+                  <TableHead className="w-40">Data</TableHead>
                   <TableHead className="w-24">Duração</TableHead>
                   <TableHead className="w-40">Mídia</TableHead>
                 </TableRow>
@@ -347,6 +468,23 @@ export default function MeetingsPage() {
                       >
                         {meeting.title}
                       </Link>
+                    </TableCell>
+                    <TableCell>
+                      {meeting.project_name ? (
+                        <Link to={`/projects/${meeting.project_id}`}>
+                          <Badge
+                            variant="secondary"
+                            className="gap-1 transition-colors hover:bg-secondary/80"
+                          >
+                            <FolderKanban className="size-3 shrink-0" />
+                            <span className="max-w-[6rem] truncate">
+                              {meeting.project_name}
+                            </span>
+                          </Badge>
+                        </Link>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
                       {meeting.date}
@@ -374,6 +512,17 @@ export default function MeetingsPage() {
             {selectedIds.length}{" "}
             {selectedIds.length === 1 ? "selecionada" : "selecionadas"}
           </span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setBulkMoveProjectId("none")
+              setBulkMoveOpen(true)
+            }}
+          >
+            <MoveRight className="size-4" />
+            Mover para projeto
+          </Button>
           <AlertDialog>
             <AlertDialogTrigger asChild>
               <Button variant="destructive" size="sm">
@@ -405,6 +554,57 @@ export default function MeetingsPage() {
           </AlertDialog>
         </div>
       )}
+
+      {/* Bulk move project dialog */}
+      <Dialog open={bulkMoveOpen} onOpenChange={setBulkMoveOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>
+              Mover {selectedIds.length}{" "}
+              {selectedIds.length === 1 ? "reunião" : "reuniões"} para…
+            </DialogTitle>
+          </DialogHeader>
+          <Select
+            value={bulkMoveProjectId}
+            onValueChange={setBulkMoveProjectId}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder="Escolher projeto…" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">
+                <span className="flex items-center gap-1.5">
+                  <FolderX className="size-4" />
+                  Sem projeto (desassociar)
+                </span>
+              </SelectItem>
+              {projects.map((p) => (
+                <SelectItem key={p.id} value={String(p.id)}>
+                  <span className="flex items-center gap-1.5">
+                    <FolderKanban className="size-4" />
+                    {p.name}
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setBulkMoveOpen(false)}
+              disabled={bulkMoveMutation.isPending}
+            >
+              Cancelar
+            </Button>
+            <Button
+              onClick={handleBulkMove}
+              disabled={bulkMoveMutation.isPending}
+            >
+              {bulkMoveMutation.isPending ? "Movendo…" : "Mover"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
