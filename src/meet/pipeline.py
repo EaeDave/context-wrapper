@@ -28,6 +28,7 @@ def _process_plan(*, no_llm: bool, import_media: bool) -> tuple[StepSpec, ...]:
         )
     )
     if not no_llm:
+        steps.append(StepSpec("normalize", "Revisar termos da transcrição", 4.0))
         steps.append(StepSpec("llm", "Gerar resumo e tarefas", 5.0))
     steps.append(StepSpec("save", "Salvar reunião", 2.0))
     if import_media:
@@ -105,6 +106,7 @@ def _analyse(
     tracker: ProgressTracker,
     title: str | None = None,
     num_speakers: int = 0,
+    project_id: int | None = None,
 ) -> tuple[MeetingResult, dict[str, Any], list[str]]:
     """Executa áudio → transcrição → diarização → merge → LLM, sem persistir."""
     from . import audio as audio_mod
@@ -137,6 +139,8 @@ def _analyse(
     except Exception as exc:
         raise RuntimeError(f"Erro ao preparar áudio: {exc}") from exc
 
+    project = store.get_project(project_id) if project_id is not None else None
+    learned_terms = store.project_vocabulary(project_id) if project_id is not None else []
     embeddings: dict[str, Any] = {}
     tracker.start("transcribe", "Transcrevendo áudio")
     duration = tracks.duration
@@ -162,6 +166,7 @@ def _analyse(
                     on_progress=transcription_progress(
                         0.0, 0.5, "Transcrevendo microfone"
                     ),
+                    hotwords=learned_terms,
                 )
             except Exception as exc:
                 raise RuntimeError(f"Erro ao transcrever microfone: {exc}") from exc
@@ -174,6 +179,7 @@ def _analyse(
                     on_progress=transcription_progress(
                         0.5, 0.5, "Transcrevendo participantes"
                     ),
+                    hotwords=learned_terms,
                 )
             except Exception as exc:
                 raise RuntimeError(
@@ -190,6 +196,7 @@ def _analyse(
                 on_progress=transcription_progress(
                     0.0, 1.0, "Transcrevendo reunião"
                 ),
+                hotwords=learned_terms,
             )
         except Exception as exc:
             raise RuntimeError(f"Erro ao transcrever: {exc}") from exc
@@ -244,6 +251,17 @@ def _analyse(
     segments = merge_mod.rename_speakers(segments, mapping)
     participants = sorted({s.speaker for s in segments if s.speaker})
     tracker.update(1.0, "Vozes reconhecidas")
+
+    if not no_llm:
+        tracker.start("normalize", "Revisando termos da transcrição", determinate=True)
+        segments = extract_mod.normalize_transcript(
+            segments,
+            settings,
+            project_name=project.name if project else None,
+            project_description=project.description if project else None,
+            learned_terms=learned_terms,
+            on_progress=tracker.update,
+        )
 
     summary = ""
     action_items: list[ActionItem] = []
@@ -383,6 +401,7 @@ def _run(
         tracker=tracker,
         title=title,
         num_speakers=num_speakers,
+        project_id=project_id,
     )
 
     tracker.start("save", "Salvando markdown e banco")
@@ -455,6 +474,7 @@ def reprocess_meeting(
             today=existing.date,
             tracker=tracker,
             num_speakers=num_speakers,
+            project_id=existing.project_id,
         )
         result.visual_evidence = store.replace_visual_evidence(
             meeting_id, result.visual_evidence, settings.data_dir
@@ -488,7 +508,8 @@ def reextract_meeting(
     tracker = ProgressTracker(
         (
             StepSpec("auth", "Validar acesso ao LLM", 1.0),
-            StepSpec("llm", "Gerar resumo e tarefas", 8.0),
+            StepSpec("normalize", "Revisar termos da transcrição", 3.0),
+            StepSpec("llm", "Gerar resumo e tarefas", 5.0),
             StepSpec("save", "Salvar reunião", 1.0),
         ),
         on_progress,
@@ -499,6 +520,25 @@ def reextract_meeting(
     except Exception as exc:
         raise RuntimeError(f"Erro na autenticação LLM: {exc}") from exc
     tracker.update(1.0, "Acesso ao LLM validado")
+    project = (
+        store.get_project(existing.project_id)
+        if existing.project_id is not None
+        else None
+    )
+    learned_terms = (
+        store.project_vocabulary(existing.project_id)
+        if existing.project_id is not None
+        else []
+    )
+    tracker.start("normalize", "Revisando termos da transcrição", determinate=True)
+    existing.segments = extract_mod.normalize_transcript(
+        existing.segments,
+        settings,
+        project_name=project.name if project else None,
+        project_description=project.description if project else None,
+        learned_terms=learned_terms,
+        on_progress=tracker.update,
+    )
 
     tracker.start("llm", "Gerando resumo e tarefas com LLM", determinate=False)
     try:
@@ -512,6 +552,7 @@ def reextract_meeting(
         raise RuntimeError(f"Erro na extração LLM: {exc}") from exc
 
     tracker.start("save", "Salvando resultado no banco")
+    store.update_segment_normalization(meeting_id, existing.segments)
     store.update_meeting_extract(meeting_id, summary, action_items, None, facts)
     store._regen_md(meeting_id)
     tracker.finish(f"Re-extração concluída — reunião #{meeting_id}")

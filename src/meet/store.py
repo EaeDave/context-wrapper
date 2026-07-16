@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import ActionItem, MeetingFact, MeetingResult, TranscriptSegment, VisualEvidence
+from .models import ActionItem, MeetingFact, MeetingResult, TranscriptCorrection, TranscriptSegment, VisualEvidence
 
 
 _SCHEMA = """\
@@ -112,8 +112,55 @@ _ACTION_ITEM_EXTRA_COLS: list[tuple[str, str]] = [
     ("review_status", "TEXT NOT NULL DEFAULT 'needs_review'"),
 ]
 
+_SEGMENT_EXTRA_COLS: list[tuple[str, str]] = [
+    ("original_text", "TEXT"),
+    ("corrections", "TEXT NOT NULL DEFAULT '[]'"),
+]
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _parse_corrections(raw: str | None) -> list[TranscriptCorrection]:
+    """Deserializa JSON de corrections → lista de TranscriptCorrection."""
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    out: list[TranscriptCorrection] = []
+    for c in items:
+        if not isinstance(c, dict):
+            continue
+        try:
+            out.append(
+                TranscriptCorrection(
+                    original=c["original"],
+                    corrected=c["corrected"],
+                    confidence=float(c["confidence"]),
+                    reason=c.get("reason", ""),
+                )
+            )
+        except (KeyError, ValueError, TypeError):
+            continue
+    return out
+
+
+def _dump_corrections(corrections: list[TranscriptCorrection]) -> str:
+    """Serializa lista de TranscriptCorrection → JSON compacto."""
+    return json.dumps(
+        [
+            {
+                "original": c.original,
+                "corrected": c.corrected,
+                "confidence": c.confidence,
+                "reason": c.reason,
+            }
+            for c in corrections
+        ],
+        ensure_ascii=False,
+    )
 
 
 @dataclass
@@ -167,6 +214,10 @@ class Store:
             r["name"]
             for r in self._conn.execute("PRAGMA table_info(action_items)").fetchall()
         }
+        segment_cols = {
+            r["name"]
+            for r in self._conn.execute("PRAGMA table_info(segments)").fetchall()
+        }
         with self._conn:
             for name, decl in _MEETING_EXTRA_COLS:
                 if name not in meeting_cols:
@@ -177,6 +228,11 @@ class Store:
                 if name not in action_cols:
                     self._conn.execute(
                         f"ALTER TABLE action_items ADD COLUMN {name} {decl}"
+                    )
+            for name, decl in _SEGMENT_EXTRA_COLS:
+                if name not in segment_cols:
+                    self._conn.execute(
+                        f"ALTER TABLE segments ADD COLUMN {name} {decl}"
                     )
             # Backfill timestamps vazios
             now = _now()
@@ -290,9 +346,18 @@ class Store:
 
             for seg in result.segments:
                 self._conn.execute(
-                    "INSERT INTO segments (meeting_id, start, end, speaker, text)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (meeting_id, seg.start, seg.end, seg.speaker, seg.text),
+                    "INSERT INTO segments"
+                    " (meeting_id, start, end, speaker, text, original_text, corrections)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        meeting_id,
+                        seg.start,
+                        seg.end,
+                        seg.speaker,
+                        seg.text,
+                        seg.original_text,
+                        _dump_corrections(seg.corrections),
+                    ),
                 )
 
             self._index_meeting(meeting_id, result.segments, result.action_items, result.facts)
@@ -371,9 +436,11 @@ class Store:
                 text=r["text"],
                 speaker=r["speaker"],
                 id=r["id"],
+                original_text=r["original_text"] or None,
+                corrections=_parse_corrections(r["corrections"]),
             )
             for r in self._conn.execute(
-                "SELECT id, start, end, speaker, text FROM segments"
+                "SELECT id, start, end, speaker, text, original_text, corrections FROM segments"
                 " WHERE meeting_id = ? ORDER BY start",
                 (meeting_id,),
             )
@@ -937,7 +1004,7 @@ class Store:
             return False
         placeholders = ",".join("?" * len(seg_ids))
         rows = self._conn.execute(
-            f"SELECT id, start, end, speaker FROM segments"
+            f"SELECT id, start, end, speaker, text, original_text FROM segments"
             f" WHERE meeting_id = ? AND id IN ({placeholders})"
             f" ORDER BY start",
             (meeting_id, *seg_ids),
@@ -963,18 +1030,25 @@ class Store:
                     (_now(), meeting_id),
                 )
         else:
-            # Colapsar: primeiro segmento recebe start/end/text/speaker; demais deletados
+            # Colapsar: primeiro segmento recebe start/end/text/speaker; demais deletados.
+            # Edição humana: original_text recebe texto anterior se ainda não auditado;
+            # corrections reset para [] (não é correção LLM).
             first = rows[0]
             start = first["start"]
             end = rows[-1]["end"]
             spk = speaker if speaker is not None else first["speaker"]
             first_id = first["id"]
             rest_ids = [r["id"] for r in rows[1:]]
+            prev_text: str = first["text"] or ""
+            orig: str | None = first["original_text"] or None
+            # Preserva original_text existente; se vazio, captura texto anterior
+            new_original = orig if orig is not None else (prev_text if prev_text else None)
             with self._conn:
                 self._conn.execute(
-                    "UPDATE segments SET start=?, end=?, text=?, speaker=?"
+                    "UPDATE segments SET start=?, end=?, text=?, speaker=?,"
+                    " original_text=?, corrections=?"
                     " WHERE id=?",
-                    (start, end, text, spk, first_id),
+                    (start, end, text, spk, new_original, "[]", first_id),
                 )
                 if rest_ids:
                     rest_ph = ",".join("?" * len(rest_ids))
@@ -1041,9 +1115,18 @@ class Store:
                 )
             for seg in result.segments:
                 self._conn.execute(
-                    "INSERT INTO segments (meeting_id, start, end, speaker, text)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (meeting_id, seg.start, seg.end, seg.speaker, seg.text),
+                    "INSERT INTO segments"
+                    " (meeting_id, start, end, speaker, text, original_text, corrections)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        meeting_id,
+                        seg.start,
+                        seg.end,
+                        seg.speaker,
+                        seg.text,
+                        seg.original_text,
+                        _dump_corrections(seg.corrections),
+                    ),
                 )
             self._conn.execute(
                 "DELETE FROM search_index WHERE meeting_id=?", (meeting_id,)
@@ -1439,6 +1522,101 @@ class Store:
                 [project_id, now, *meeting_ids],
             )
         return cur.rowcount
+
+    # ------------------------------------------------------------------
+    # Transcript — normalização / vocabulário
+    # ------------------------------------------------------------------
+
+    def update_segment_normalization(
+        self,
+        meeting_id: int,
+        segments: list[TranscriptSegment],
+    ) -> None:
+        """Atualiza text/original_text/corrections dos segmentos por id; reindexa FTS. Atômico.
+
+        Usado após reextract/normalização automática para persistir texto corrigido e
+        trilha de auditoria sem tocar em speaker, start ou end.
+        Segmentos sem id são ignorados silenciosamente.
+        """
+        relevant = [s for s in segments if s.id is not None]
+        if not relevant:
+            return
+        with self._conn:
+            for seg in relevant:
+                self._conn.execute(
+                    "UPDATE segments"
+                    " SET text=?, original_text=?, corrections=?"
+                    " WHERE id=? AND meeting_id=?",
+                    (
+                        seg.text,
+                        seg.original_text,
+                        _dump_corrections(seg.corrections),
+                        seg.id,
+                        meeting_id,
+                    ),
+                )
+            self._conn.execute(
+                "DELETE FROM search_index WHERE meeting_id=?", (meeting_id,)
+            )
+            self._reindex_meeting_fts(meeting_id)
+            self._conn.execute(
+                "UPDATE meetings SET updated_at=? WHERE id=?", (_now(), meeting_id)
+            )
+
+    def project_vocabulary(self, project_id: int, limit: int = 80) -> list[str]:
+        """Vocabulário corrigido com alta confiança extraído de reuniões do projeto.
+
+        Agrega termos 'corrected' de corrections JSON em segments, filtrando por
+        confidence >= 0.9. Ranqueia por frequência × peso de recência (reuniões mais
+        recentes pesam mais). Retorna lista deduplicada de até `limit` termos.
+        """
+        rows = self._conn.execute(
+            "SELECT s.corrections, m.date"
+            " FROM segments s"
+            " JOIN meetings m ON m.id = s.meeting_id"
+            " WHERE m.project_id = ?"
+            "   AND s.corrections IS NOT NULL"
+            "   AND s.corrections != '[]'",
+            (project_id,),
+        ).fetchall()
+
+        if not rows:
+            return []
+
+        # Ordenar datas mais recentes primeiro para calcular peso de recência
+        dates_sorted = sorted(
+            {r["date"] for r in rows if r["date"]}, reverse=True
+        )
+        date_rank: dict[str, int] = {d: i for i, d in enumerate(dates_sorted)}
+
+        scores: dict[str, float] = {}
+        counts: dict[str, int] = {}
+
+        for row in rows:
+            raw = row["corrections"]
+            try:
+                items = json.loads(raw) if raw else []
+            except (json.JSONDecodeError, TypeError):
+                continue
+            date = row["date"] or ""
+            rank = date_rank.get(date, len(dates_sorted))
+            # recência: 1/(1+rank) — rank 0 (mais recente) → peso 1.0
+            recency = 1.0 / (1.0 + rank)
+            for c in items:
+                if not isinstance(c, dict):
+                    continue
+                conf = c.get("confidence", 0.0)
+                if conf < 0.9:
+                    continue
+                term = (c.get("corrected") or "").strip()
+                if not term:
+                    continue
+                counts[term] = counts.get(term, 0) + 1
+                scores[term] = scores.get(term, 0.0) + conf * recency
+
+        # Ranquear por score descendente; desempate alfabético para estabilidade
+        ranked = sorted(scores, key=lambda t: (-scores[t], t))
+        return ranked[:limit]
 
     # ------------------------------------------------------------------
     # Internos

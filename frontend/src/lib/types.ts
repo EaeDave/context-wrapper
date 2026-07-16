@@ -94,12 +94,23 @@ export interface MeetingFact {
   visual_evidence?: VisualEvidence[]
 }
 
+export interface TranscriptCorrection {
+  original: string
+  corrected: string
+  confidence: number  // 0–1
+  reason: string
+}
+
 export interface TranscriptGroup {
   speaker: string        // "me" | "SPEAKER_XX" | nome atribuído | "?"
   start: number          // segundos — usar p/ seek no player
   end: number
-  text: string           // concatenado
+  text: string           // texto corrigido concatenado
   seg_ids: number[]      // ids dos segmentos deste turno agrupado
+  /** Presente somente quando ao menos um segmento do grupo foi corrigido automaticamente. */
+  original_text?: string
+  /** Correções aplicadas neste grupo (subset de original_text vs text). */
+  corrections?: TranscriptCorrection[]
 }
 
 export interface MeetingDetail {

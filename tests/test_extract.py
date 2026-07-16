@@ -1156,6 +1156,11 @@ def test_analyse_propaga_callback_da_extracao_ao_tracker(
         return "Resumo", [], "Título", []
 
     monkeypatch.setattr(extract_mod, "extract", fake_extract)
+    monkeypatch.setattr(
+        extract_mod,
+        "normalize_transcript",
+        lambda current, *_args, **_kwargs: current,
+    )
     updates = []
     tracker = ProgressTracker(
         (
@@ -1164,6 +1169,7 @@ def test_analyse_propaga_callback_da_extracao_ao_tracker(
             StepSpec("transcribe", "Transcrever", 1.0),
             StepSpec("diarize", "Diarizar", 1.0),
             StepSpec("speakers", "Vozes", 1.0),
+            StepSpec("normalize", "Normalizar", 1.0),
             StepSpec("llm", "LLM", 1.0),
         ),
         updates.append,

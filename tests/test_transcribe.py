@@ -83,6 +83,23 @@ def test_transcribe_wav_passes_exact_params() -> None:
     )
 
 
+def test_transcribe_wav_repassa_hotwords_quando_aprendidas() -> None:
+    """Vocabulário aprendido é detalhe automático, não configuração do usuário."""
+    from meet.transcribe import transcribe_wav
+
+    s = _settings()
+    model = _make_model_mock()
+    transcribe_wav(model, Path("x.wav"), s, hotwords=["DUN14", "USRMoveColetor"])
+
+    model.transcribe.assert_called_once_with(
+        "x.wav",
+        language=s.language,
+        vad_filter=True,
+        word_timestamps=True,
+        hotwords="DUN14, USRMoveColetor",
+    )
+
+
 def test_transcribe_wav_fires_progress_callback() -> None:
     """on_progress é chamado com (fraction, seconds) para cada segmento e ao fim."""
     from meet.transcribe import transcribe_wav

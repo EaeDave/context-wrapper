@@ -18,6 +18,16 @@ class Word:
     text: str
 
 
+@dataclass(frozen=True)
+class TranscriptCorrection:
+    """Substituição fonética/terminológica aplicada com evidência contextual."""
+
+    original: str
+    corrected: str
+    confidence: float
+    reason: str
+
+
 @dataclass
 class TranscriptSegment:
     """Um trecho de fala transcrito."""
@@ -30,6 +40,9 @@ class TranscriptSegment:
     # Palavras com timestamps (transiente: usado só p/ atribuir falante por palavra
     # no merge; não é persistido no banco).
     words: list[Word] | None = None
+    # Preenchido somente quando a normalização automática alterou o texto.
+    original_text: str | None = None
+    corrections: list[TranscriptCorrection] = field(default_factory=list)
     # id do banco (transiente — preenchido ao ler via get_meeting p/ a UI referenciar turnos).
     id: int | None = None
 

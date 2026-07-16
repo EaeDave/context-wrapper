@@ -18,6 +18,17 @@ gravação (OBS) ──> wav 16k ──> transcrição + diarização ──> LL
   vozes, extrai resumo/action items, salva o resultado e, por padrão, importa a
   mídia. A opção “Sem LLM” mantém transcrição e diarização, sem resumo nem
   action items. **Job interno:** `process`; **endpoint interno:** `POST /api/process`.
+- Antes de resumo, tarefas e fatos, a LLM faz uma revisão conservadora do
+  transcript: corrige somente erros fonéticos ou terminológicos com confiança
+  mínima de 90%, sustentados pela própria reunião ou pelo histórico do projeto.
+  Termos corretos descobertos em qualquer bloco ajudam todos os demais; números
+  não podem mudar. Cada ajuste preserva o texto bruto do Whisper, a justificativa
+  e a confiança, e a página da reunião permite revelar essa auditoria. Correções
+  confirmadas alimentam automaticamente o vocabulário transitório das próximas
+  reuniões do mesmo projeto e são repassadas ao Whisper como `hotwords`, sem
+  cadastro ou configuração manual. Falha nessa revisão mantém o transcript bruto.
+  A opção “Sem LLM” não executa a revisão. **Jobs internos:** `process`,
+  `reprocess`, `reextract`; **integração externa:** LLM configurada.
 - A análise de tela é opcional. Quando habilitada em uma gravação com vídeo, o
   pipeline prioriza momentos em que a fala referencia a interface, acrescenta
   amostras periódicas de segurança, remove telas quase idênticas e envia apenas

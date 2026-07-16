@@ -1,8 +1,8 @@
 import { useRef, useEffect, useState } from "react"
-import { FileText, Pencil, UserCircle, Fingerprint, Quote } from "lucide-react"
+import { FileText, Pencil, UserCircle, Fingerprint, Quote, ChevronDown, ChevronUp, Wand2 } from "lucide-react"
 import { useQueryClient, useMutation } from "@tanstack/react-query"
 import { toast } from "sonner"
-import type { TranscriptGroup } from "@/lib/types"
+import type { TranscriptGroup, TranscriptCorrection } from "@/lib/types"
 import * as api from "@/lib/api"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -82,6 +82,17 @@ export function Transcript({
   const [speakerSelect, setSpeakerSelect] = useState("")
   const [speakerFree, setSpeakerFree] = useState("")
   const [textValue, setTextValue] = useState("")
+  // Set de índices de grupos com original revelado
+  const [expandedOriginals, setExpandedOriginals] = useState<Set<number>>(new Set())
+
+  function toggleOriginal(index: number) {
+    setExpandedOriginals((prev) => {
+      const next = new Set(prev)
+      if (next.has(index)) next.delete(index)
+      else next.add(index)
+      return next
+    })
+  }
 
   // Turno ativo = último turno já iniciado (start <= currentTime). Contenção
   // [start,end) falha: mic ("me") e desktop são transcritos em separado e seus
@@ -272,12 +283,52 @@ export function Transcript({
                           trecho citado
                         </span>
                       )}
+                      {g.original_text && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                          <Wand2 className="size-2.5" />
+                          ajustada
+                        </span>
+                      )}
                     </div>
                     <p className="mt-0.5 text-sm leading-relaxed">{g.text}</p>
+                    {g.original_text && expandedOriginals.has(i) && (
+                      <div className="mt-1.5 rounded border border-amber-200 bg-amber-50/60 px-2 py-1.5 dark:border-amber-800/50 dark:bg-amber-950/20">
+                        <p className="text-xs font-medium text-amber-700 dark:text-amber-400">Original (Whisper)</p>
+                        <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{g.original_text}</p>
+                        {g.corrections && g.corrections.length > 0 && (
+                          <ul className="mt-1 space-y-0.5">
+                            {g.corrections.map((c: TranscriptCorrection, ci: number) => (
+                              <li key={ci} className="flex flex-wrap items-baseline gap-1 text-[11px] text-muted-foreground">
+                                <span className="line-through opacity-70">{c.original}</span>
+                                <span className="text-amber-600 dark:text-amber-400">→ {c.corrected}</span>
+                                <span className="opacity-50">({Math.round(c.confidence * 100)}%)</span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {/* Hover actions */}
                   <div className="flex items-start gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                    {g.original_text && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-6"
+                        title={expandedOriginals.has(i) ? "Ocultar original" : "Ver texto original"}
+                        aria-expanded={expandedOriginals.has(i)}
+                        aria-label={expandedOriginals.has(i) ? "Ocultar texto original" : "Revelar texto original"}
+                        onClick={() => toggleOriginal(i)}
+                      >
+                        {expandedOriginals.has(i) ? (
+                          <ChevronUp className="size-3.5" />
+                        ) : (
+                          <ChevronDown className="size-3.5" />
+                        )}
+                      </Button>
+                    )}
                     <Button
                       variant="ghost"
                       size="icon"

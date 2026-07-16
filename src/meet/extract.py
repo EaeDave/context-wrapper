@@ -14,7 +14,7 @@ from pathlib import Path
 import httpx
 
 from .config import Settings
-from .models import ActionItem, MeetingFact, TranscriptSegment
+from .models import ActionItem, MeetingFact, TranscriptCorrection, TranscriptSegment
 
 # Reuniões densas geram saídas maiores que o transcript sugere. Dividir cedo
 # limita cada resposta e evita perder o documento inteiro por truncamento.
@@ -867,6 +867,200 @@ def _parse_json_response(text: str) -> dict:
         except json.JSONDecodeError:
             pass
     raise ValueError(text)
+
+
+_TRANSCRIPT_VOCABULARY_SYSTEM = """\
+Identifique termos canônicos técnicos ou de domínio que aparecem LITERALMENTE
+nestes segmentos: siglas, identificadores, produtos, métodos, formatos e termos
+operacionais específicos. Não corrija nada e não invente termos.
+Retorne SOMENTE JSON válido: {"terms":["DUN14","USRMoveColetor"]}.
+Inclua no máximo 30 termos que seriam úteis para reconhecer erros fonéticos em
+outros trechos da mesma reunião.
+"""
+
+
+_TRANSCRIPT_NORMALIZATION_SYSTEM = """\
+Você corrige somente erros fonéticos evidentes de ASR em transcrições técnicas.
+Não reescreva estilo, gramática ou pontuação. Não resuma, complete, remova ou
+reordene fala. Preserve números e intenção. Use termos recorrentes na própria
+reunião e no contexto fornecido. Em dúvida, não corrija.
+
+Retorne SOMENTE JSON válido:
+{"corrections":[{"index":0,"original":"trecho literal exato","corrected":"termo correto","confidence":0.98,"reason":"evidência curta"}]}
+Inclua apenas confiança >= 0.90. `original` deve existir literalmente no segmento.
+"""
+
+
+def _normalization_context(
+    project_name: str | None,
+    project_description: str | None,
+    learned_terms: list[str],
+) -> str:
+    lines: list[str] = []
+    if project_name:
+        lines.append(f"Projeto: {project_name}")
+    if project_description:
+        lines.append(f"Descrição: {project_description}")
+    if learned_terms:
+        lines.append("Termos aprendidos em reuniões anteriores: " + ", ".join(learned_terms))
+    return "\n".join(lines) or "Sem contexto anterior; use somente a própria reunião."
+
+
+def _normalization_batches(
+    segments: list[TranscriptSegment], max_chars: int = 10_000
+) -> list[list[tuple[int, TranscriptSegment]]]:
+    batches: list[list[tuple[int, TranscriptSegment]]] = []
+    current: list[tuple[int, TranscriptSegment]] = []
+    size = 0
+    for index, segment in enumerate(segments):
+        addition = len(segment.text) + 32
+        if current and size + addition > max_chars:
+            batches.append(current)
+            current = []
+            size = 0
+        current.append((index, segment))
+        size += addition
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _replace_literal_once(text: str, original: str, corrected: str) -> str | None:
+    start = text.find(original)
+    if start < 0 or text.find(original, start + len(original)) >= 0:
+        return None
+    return text[:start] + corrected + text[start + len(original) :]
+
+
+def _discover_meeting_terms(
+    provider: LLMProvider,
+    batches: list[list[tuple[int, TranscriptSegment]]],
+) -> list[str]:
+    """Une vocabulário literal descoberto em todos os blocos da reunião."""
+    transcript = "\n".join(segment.text for batch in batches for _, segment in batch)
+    transcript_folded = transcript.casefold()
+    terms: list[str] = []
+    seen: set[str] = set()
+    for batch in batches:
+        payload = [segment.text for _, segment in batch]
+        try:
+            data = _parse_json_response(
+                provider.complete(
+                    _TRANSCRIPT_VOCABULARY_SYSTEM,
+                    json.dumps(payload, ensure_ascii=False),
+                )
+            )
+        except (ValueError, RuntimeError, httpx.HTTPError):
+            continue
+        for raw in data.get("terms") or []:
+            term = str(raw).strip()
+            key = term.casefold()
+            if (
+                not term
+                or len(term) > 80
+                or key in seen
+                or key not in transcript_folded
+            ):
+                continue
+            seen.add(key)
+            terms.append(term)
+            if len(terms) >= 80:
+                return terms
+    return terms
+
+
+def normalize_transcript(
+    segments: list[TranscriptSegment],
+    settings: Settings,
+    *,
+    project_name: str | None = None,
+    project_description: str | None = None,
+    learned_terms: list[str] | None = None,
+    provider: LLMProvider | None = None,
+    on_progress: ExtractionProgressCallback | None = None,
+) -> list[TranscriptSegment]:
+    """Corrige erros fonéticos de alta confiança; falha preserva o ASR bruto."""
+    if not segments:
+        return segments
+    provider = provider or get_provider(settings)
+    batches = _normalization_batches(segments)
+    meeting_terms = _discover_meeting_terms(provider, batches)
+    all_terms = list(learned_terms or [])
+    known = {term.casefold() for term in all_terms}
+    all_terms.extend(
+        term for term in meeting_terms if term.casefold() not in known
+    )
+    context = _normalization_context(
+        project_name, project_description, all_terms
+    )
+    corrected_segments = [
+        TranscriptSegment(
+            start=segment.start,
+            end=segment.end,
+            text=segment.text,
+            speaker=segment.speaker,
+            words=segment.words,
+            original_text=segment.original_text,
+            corrections=list(segment.corrections),
+            id=segment.id,
+        )
+        for segment in segments
+    ]
+
+    for batch_number, batch in enumerate(batches, start=1):
+        payload = [
+            {"index": index, "speaker": segment.speaker, "text": segment.text}
+            for index, segment in batch
+        ]
+        prompt = (
+            f"Contexto automático:\n{context}\n\n"
+            "Segmentos desta reunião:\n"
+            + json.dumps(payload, ensure_ascii=False)
+        )
+        try:
+            data = _parse_json_response(
+                provider.complete(_TRANSCRIPT_NORMALIZATION_SYSTEM, prompt)
+            )
+        except (ValueError, RuntimeError, httpx.HTTPError):
+            continue
+        allowed_indexes = {index for index, _segment in batch}
+        for raw in data.get("corrections") or []:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                index = int(raw["index"])
+                confidence = float(raw["confidence"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            original = str(raw.get("original") or "").strip()
+            corrected = str(raw.get("corrected") or "").strip()
+            reason = str(raw.get("reason") or "Contexto da reunião").strip()
+            if (
+                index not in allowed_indexes
+                or confidence < 0.90
+                or not original
+                or not corrected
+                or original.casefold() == corrected.casefold()
+                or re.findall(r"\d+", original) != re.findall(r"\d+", corrected)
+                or len(corrected) > max(4 * len(original), len(original) + 40)
+            ):
+                continue
+            segment = corrected_segments[index]
+            replaced = _replace_literal_once(segment.text, original, corrected)
+            if replaced is None:
+                continue
+            if segment.original_text is None:
+                segment.original_text = segment.text
+            segment.text = replaced
+            segment.corrections.append(
+                TranscriptCorrection(original, corrected, confidence, reason)
+            )
+        if on_progress is not None:
+            on_progress(
+                batch_number / len(batches),
+                f"Revisando transcrição · bloco {batch_number} de {len(batches)}",
+            )
+    return corrected_segments
 
 
 def analyze_visual_frames(

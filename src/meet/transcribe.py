@@ -91,18 +91,21 @@ def transcribe_wav(
     wav: Path,
     settings: Settings,
     on_progress: TranscribeProgress | None = None,
+    hotwords: list[str] | None = None,
 ) -> list[TranscriptSegment]:
     """Transcreve wav usando modelo existente; caller gerencia o lifecycle do modelo.
 
     Reporta (fração, segundo alcançado) via on_progress ao consumir segmentos.
     Parâmetros idênticos aos da chamada legada: language, vad_filter, word_timestamps.
     """
-    segments_iter, info = model.transcribe(
-        str(wav),
-        language=settings.language,
-        vad_filter=True,
-        word_timestamps=True,
-    )
+    transcribe_kwargs = {
+        "language": settings.language,
+        "vad_filter": True,
+        "word_timestamps": True,
+    }
+    if hotwords:
+        transcribe_kwargs["hotwords"] = ", ".join(hotwords)
+    segments_iter, info = model.transcribe(str(wav), **transcribe_kwargs)
     duration = max(float(info.duration), 0.001)
     result: list[TranscriptSegment] = []
     for seg in segments_iter:
@@ -126,6 +129,7 @@ def transcribe(
     wav: Path,
     settings: Settings,
     on_progress: TranscribeProgress | None = None,
+    hotwords: list[str] | None = None,
 ) -> list[TranscriptSegment]:
     """Cria modelo, transcreve e libera VRAM num único call.
 
@@ -135,6 +139,6 @@ def transcribe(
     """
     model = load_model(settings)
     try:
-        return transcribe_wav(model, wav, settings, on_progress)
+        return transcribe_wav(model, wav, settings, on_progress, hotwords)
     finally:
         release_model(model)

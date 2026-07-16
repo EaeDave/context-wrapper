@@ -65,11 +65,19 @@ def _group_transcript(segments) -> list[dict]:
     """Agrupa segmentos consecutivos do mesmo falante.
 
     Retorna start/end numéricos + text concatenado + seg_ids dos segmentos agrupados.
+    Inclui original_text (só quando algum segmento foi corrigido) e corrections
+    agregadas para auditoria.
     """
     groups: list[dict] = []
     for seg in segments:
         if groups and groups[-1]["speaker"] == seg.speaker:
             groups[-1]["_texts"].append(seg.text)
+            # Para o original concatenado: usar original_text se houve correção,
+            # senão o texto atual (semântica: "o que o Whisper entregou").
+            groups[-1]["_originals"].append(seg.original_text if seg.original_text else seg.text)
+            if seg.original_text:
+                groups[-1]["_has_original"] = True
+            groups[-1]["_corrections"].extend(seg.corrections)
             groups[-1]["end"] = seg.end
             if seg.id is not None:
                 groups[-1]["seg_ids"].append(seg.id)
@@ -81,19 +89,35 @@ def _group_transcript(segments) -> list[dict]:
                     "start": seg.start,
                     "end": seg.end,
                     "_texts": [seg.text],
+                    "_originals": [seg.original_text if seg.original_text else seg.text],
+                    "_has_original": bool(seg.original_text),
+                    "_corrections": list(seg.corrections),
                     "seg_ids": seg_ids,
                 }
             )
-    return [
-        {
+    result = []
+    for g in groups:
+        entry: dict = {
             "speaker": g["speaker"],
             "start": g["start"],
             "end": g["end"],
             "text": " ".join(g["_texts"]),
             "seg_ids": g["seg_ids"],
         }
-        for g in groups
-    ]
+        if g["_has_original"]:
+            entry["original_text"] = " ".join(g["_originals"])
+        if g["_corrections"]:
+            entry["corrections"] = [
+                {
+                    "original": c.original,
+                    "corrected": c.corrected,
+                    "confidence": c.confidence,
+                    "reason": c.reason,
+                }
+                for c in g["_corrections"]
+            ]
+        result.append(entry)
+    return result
 
 
 def _serialize_job(job: Job) -> dict:
