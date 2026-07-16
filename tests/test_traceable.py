@@ -436,6 +436,7 @@ def test_api_meeting_detail_shape(tmp_path: Path) -> None:
     with mock.patch("meet.web.app._settings_store", return_value=(settings, store)):
         client = TestClient(app)
         resp = client.get(f"/api/meetings/{mid}")
+        markdown_resp = client.get(f"/api/meetings/{mid}/markdown")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -466,6 +467,17 @@ def test_api_meeting_detail_shape(tmp_path: Path) -> None:
     assert f["source_end"] == 3.0
     assert f["evidence_quote"] == "vamos usar PostgreSQL"
     assert f["explicitness"] == "explicit"
+
+    assert markdown_resp.status_code == 200
+    assert markdown_resp.headers["content-type"].startswith("text/markdown")
+    downloaded = markdown_resp.text
+    assert "## Action items" in downloaded
+    assert "**Responsáveis:** me" in downloaded
+    assert "## Fatos da reunião" in downloaded
+    assert "### Decisões" in downloaded
+    assert "usar PostgreSQL" in downloaded
+    assert "**Evidência:** “vamos usar PostgreSQL”" in downloaded
+    assert "## Transcript" in downloaded
     assert f["review_status"] == "confirmed"
     assert f["id"] is not None
 

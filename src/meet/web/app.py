@@ -497,6 +497,22 @@ def create_app() -> FastAPI:
             "project_name": project.name if project else None,
         }
 
+    @app.get("/api/meetings/{meeting_id}/markdown")
+    def api_meeting_markdown(meeting_id: int) -> FileResponse:
+        """Regenera e baixa o documento canônico a partir do estado atual do banco."""
+        _settings, store = _settings_store()
+        result = store.get_meeting(meeting_id)
+        if result is None:
+            raise HTTPException(404, "Reunião não encontrada")
+        md_path = getattr(result, "md_path", None)
+        if not md_path:
+            raise HTTPException(404, "Reunião sem arquivo Markdown associado")
+        store._regen_md(meeting_id)
+        path = Path(md_path)
+        if not path.is_file():
+            raise HTTPException(404, "Arquivo Markdown não encontrado")
+        return FileResponse(path, media_type="text/markdown", filename=path.name)
+
     @app.get("/api/meetings/{meeting_id}/visual-evidence/{evidence_id}")
     def api_visual_evidence(meeting_id: int, evidence_id: int) -> FileResponse:
         settings, store = _settings_store()

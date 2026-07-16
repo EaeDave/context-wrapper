@@ -14,19 +14,11 @@ import json
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from .models import FACT_KIND_LABELS, FACT_KINDS
 
 if TYPE_CHECKING:
     from .store import Store
 
-# Quatro kinds de fatos estruturados
-_FACT_KINDS = ("decision", "requirement", "constraint", "open_question")
-
-_KIND_LABELS: dict[str, str] = {
-    "decision": "Decisão",
-    "requirement": "Requisito",
-    "constraint": "Restrição",
-    "open_question": "Questão em aberto",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -368,11 +360,11 @@ def _render_markdown(
             if include_facts and mtg.facts:
                 lines.append("**Fatos:**")
                 lines.append("")
-                for kind in _FACT_KINDS:
+                for kind in FACT_KINDS:
                     kind_facts = [f for f in mtg.facts if f.kind == kind]
                     if not kind_facts:
                         continue
-                    lines.append(f"*{_KIND_LABELS.get(kind, kind)}*")
+                    lines.append(f"*{FACT_KIND_LABELS.get(kind, kind)}*")
                     lines.append("")
                     for fact in kind_facts:
                         review_badge = (

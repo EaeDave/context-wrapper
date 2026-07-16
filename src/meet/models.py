@@ -5,6 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+FACT_KINDS = ("decision", "requirement", "constraint", "open_question")
+FACT_KIND_LABELS: dict[str, str] = {
+    "decision": "Decisões",
+    "requirement": "Requisitos",
+    "constraint": "Restrições",
+    "open_question": "Questões em aberto",
+}
+
 # Label reservado para a voz do próprio usuário (track de microfone do OBS).
 ME = "me"
 

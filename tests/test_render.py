@@ -3,18 +3,18 @@
 Contracts defended:
 - to_markdown groups CONSECUTIVE same-speaker segments into one paragraph.
 - Non-consecutive repetitions of the same speaker produce separate paragraphs.
-- Pipe characters in action item cells are escaped as \\|.
-- Empty action_items produces the fallback sentinel line.
-- Empty segments produces the fallback sentinel line.
-- meeting_filename converts accents to ASCII, spaces to hyphens, uppercases
-  to lowercase, and prefixes the date.
+- Action items include every persisted field and traceability evidence.
+- Facts are grouped as decisions, requirements, constraints, and open questions.
+- Visual evidence is rendered as textual context for another LLM.
+- Empty collections produce explicit sentinel lines.
+- meeting_filename converts accents to ASCII, spaces to hyphens, and prefixes the date.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from meet.models import ActionItem, MeetingResult, TranscriptSegment
+from meet.models import ActionItem, MeetingFact, MeetingResult, TranscriptSegment, VisualEvidence
 from meet.render import meeting_filename, to_markdown
 
 
@@ -31,6 +31,8 @@ def _result(
     participants: list[str] | None = None,
     segments: list[TranscriptSegment] | None = None,
     action_items: list[ActionItem] | None = None,
+    facts: list[MeetingFact] | None = None,
+    visual_evidence: list[VisualEvidence] | None = None,
 ) -> MeetingResult:
     return MeetingResult(
         source="test.mkv",
@@ -41,6 +43,8 @@ def _result(
         participants=participants or [],
         segments=segments or [],
         action_items=action_items or [],
+        facts=facts or [],
+        visual_evidence=visual_evidence or [],
     )
 
 
@@ -99,28 +103,83 @@ def test_to_markdown_unknown_speaker_shown_as_desconhecido() -> None:
 # to_markdown — action items table
 # ---------------------------------------------------------------------------
 
-def test_to_markdown_action_items_table_present() -> None:
-    """Action items are rendered inside a Markdown table."""
-    items = [ActionItem(what="Fix bug", where="/api", priority="alta")]
-    md = to_markdown(_result(action_items=items))
-    assert "| O quê |" in md
-    assert "Fix bug" in md
-    assert "alta" in md
+def test_to_markdown_action_items_include_all_context_fields() -> None:
+    frame = VisualEvidence(
+        timestamp=70,
+        image_path="frame.jpg",
+        description="Tela de configurações aberta",
+        visible_text=["Salvar", "Modelo"],
+        relevance="high",
+    )
+    item = ActionItem(
+        what="Corrigir integração",
+        where="Backend",
+        details="Preservar compatibilidade",
+        requested_by="Cliente",
+        priority="alta",
+        status="aberto",
+        due="2026-08-01",
+        assigned_to=["me", "Igor"],
+        source_start=65,
+        source_end=75,
+        evidence_quote="Precisamos corrigir isso",
+        explicitness="explicit",
+        review_status="confirmed",
+        visual_evidence=[frame],
+    )
 
+    md = to_markdown(_result(action_items=[item]))
 
-def test_to_markdown_pipe_in_field_is_escaped() -> None:
-    """A literal | in an action item field must be escaped as \\|."""
-    items = [ActionItem(what="A | B", where="x|y")]
-    md = to_markdown(_result(action_items=items))
-    # Escaped form must appear; unescaped pipe inside value must not
-    assert r"A \| B" in md
-    assert r"x\|y" in md
+    for expected in (
+        "## Action items",
+        "Corrigir integração",
+        "**Status:** aberto",
+        "**Prioridade:** alta",
+        "**Responsáveis:** me, Igor",
+        "**Pedido por:** Cliente",
+        "**Onde:** Backend",
+        "**Detalhes:** Preservar compatibilidade",
+        "**Prazo:** 2026-08-01",
+        "**Trecho:** 0:01:05–0:01:15",
+        "**Evidência:** “Precisamos corrigir isso”",
+        "**Origem:** explicit",
+        "**Revisão:** confirmed",
+        "**Tela em 0:01:10:** Tela de configurações aberta",
+        "**Texto visível:** Salvar · Modelo",
+    ):
+        assert expected in md
 
 
 def test_to_markdown_empty_action_items_fallback() -> None:
-    """When there are no action items the sentinel line is present."""
     md = to_markdown(_result(action_items=[]))
     assert "_Nenhum action item identificado._" in md
+
+
+def test_to_markdown_groups_every_fact_kind_with_traceability() -> None:
+    facts = [
+        MeetingFact("decision", "Usar fila local", 10, 12, "Vamos usar fila", "explicit", "confirmed"),
+        MeetingFact("requirement", "Aceitar arquivos MKV"),
+        MeetingFact("constraint", "Executar sem internet"),
+        MeetingFact("open_question", "Qual modelo usar?"),
+    ]
+
+    md = to_markdown(_result(facts=facts))
+
+    assert "## Fatos da reunião" in md
+    for heading, text in (
+        ("### Decisões", "Usar fila local"),
+        ("### Requisitos", "Aceitar arquivos MKV"),
+        ("### Restrições", "Executar sem internet"),
+        ("### Questões em aberto", "Qual modelo usar?"),
+    ):
+        assert heading in md
+        assert text in md
+    assert "**Trecho:** 0:00:10–0:00:12" in md
+    assert "**Evidência:** “Vamos usar fila”" in md
+
+
+def test_to_markdown_empty_facts_fallback() -> None:
+    assert "_Nenhum fato estruturado identificado._" in to_markdown(_result())
 
 
 # ---------------------------------------------------------------------------

@@ -236,7 +236,7 @@ function MeetingHeader({ meeting, onRename, onDelete, onRemix, onReextract, onRe
           {meeting.md_path && (
             <DropdownMenuItem
               onClick={() =>
-                triggerDownload(`/files?path=${encodeURIComponent(meeting.md_path!)}`)
+                triggerDownload(`/api/meetings/${meeting.id}/markdown`)
               }
             >
               <FileText className="size-4" />

@@ -65,6 +65,13 @@ gravação (OBS) ──> wav 16k ──> transcrição + diarização ──> LL
   evidências e, opcionalmente, o transcript integral; ele só agrupa conteúdo já
   persistido, sem pedir nova geração à LLM. **Endpoint interno:**
   `POST /api/context/export`.
+- O Markdown baixado na página da reunião é um documento canônico para levar o
+  contexto a outra LLM. No momento do download ele é sempre regenerado a partir
+  do banco e inclui resumo, todos os campos das tarefas, decisões, requisitos,
+  restrições, questões em aberto, timestamps, citações, estado de revisão,
+  evidências visuais descritas e transcript. Reuniões antigas recebem o formato
+  completo sem nova extração. **Endpoint interno:**
+  `GET /api/meetings/{id}/markdown`.
 - Em reuniões com mais de 10 minutos ou transcript denso, nenhum trecho
   intermediário é descartado para caber no contexto da LLM. O transcript é
   analisado em blocos temporais sobrepostos de até 8 minutos. Fatos e tarefas
