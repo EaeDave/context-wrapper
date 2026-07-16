@@ -308,13 +308,36 @@ Env vars (`HF_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MEET_LLM_PROVIDER`
 `~/.config/meet/config.toml`. Campos disponíveis: ver `src/meet/config.py`
 (`whisper_model`, `language`, `device`, `similarity_threshold`, `output_dir`...).
 
+## Testes e CI
+
+O pacote wheel **exige** o frontend compilado em `src/meet/web/dist/`
+(force-include no hatch; a pasta é gitignored). Em clone limpo:
+
+```sh
+cd frontend && bun install && bun run build   # obrigatório antes do wheel/pytest de empacote
+uv sync --group dev
+uv run pytest
+ruff check src tests                         # se ruff estiver no PATH
+cd frontend && bunx tsc -p tsconfig.app.json --noEmit
+```
+
+Workflow GitHub Actions: `.github/workflows/ci.yml` (uv sync → build frontend →
+ruff → pytest → tsc).
+
+Bind remoto (não-loopback) exige `MEET_ALLOW_REMOTE=1` — por padrão o middleware
+só aceita Host loopback (mitiga DNS rebinding / exfiltração de `/files`).
+
 ## Notas técnicas
 
-- Whisper `large-v3-turbo` int8 e pyannote rodam sequencialmente e liberam VRAM
-  entre etapas — cabe folgado em 12GB.
+- Whisper default `large-v3` com `int8_float16` e pyannote rodam sequencialmente e
+  liberam VRAM entre etapas — cabe folgado em 12GB. Turbo (`large-v3-turbo`) é
+  opção mais rápida em Configurações / `whisper_model`.
 - torch é fixado no index cu128 para alinhar com o runtime CUDA 12 exigido pelo
   ctranslate2 (faster-whisper); não troque para cu13x sem revalidar.
 - Dados: `~/.local/share/meet/meet.db` (SQLite + FTS5), embeddings pendentes em
   `~/.local/share/meet/pending/`.
+- Tokens OAuth (Anthropic/OpenAI) em `data_dir/auth.json` com lock compartilhado;
+  endpoints `/files`, `/api/browse` e `/api/probe` não servem `data_dir` nem
+  `~/.config/meet`.
 
 <!-- business-readme:technical:end -->
