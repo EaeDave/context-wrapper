@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import os
 import time
 import threading
@@ -113,7 +112,9 @@ def refresh(refresh_token: str) -> dict:
             return resp.json()
         except httpx.NetworkError as exc:
             last_exc = exc
-    raise last_exc  # type: ignore[misc]
+    if last_exc is None:
+        raise RuntimeError("refresh Anthropic falhou sem exceção capturada")
+    raise last_exc
 
 
 # ---------------------------------------------------------------------------
@@ -127,46 +128,35 @@ def _auth_path(settings) -> Path:
 
 def load_tokens(settings) -> dict | None:
     """Carrega tokens anthropic do auth.json. Retorna None se ausente ou inválido."""
-    path = _auth_path(settings)
-    if not path.is_file():
-        return None
-    try:
-        d = json.loads(path.read_text())
-        return d.get("anthropic") or None
-    except Exception:
-        return None
+    from .auth_store import load_provider
+
+    return load_provider(_auth_path(settings), "anthropic")
 
 
 def save_tokens(settings, d: dict) -> None:
-    """Persiste tokens em auth.json (chmod 600)."""
-    path = _auth_path(settings)
-    existing: dict = {}
-    if path.is_file():
-        try:
-            existing = json.loads(path.read_text())
-        except Exception:
-            pass
-    existing["anthropic"] = d
-    path.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
-    path.chmod(0o600)
+    """Persiste tokens em auth.json (chmod 600, lock compartilhado)."""
+    from .auth_store import save_provider
+
+    save_provider(_auth_path(settings), "anthropic", d)
 
 
 def clear_tokens(settings) -> None:
     """Remove entrada 'anthropic' do auth.json."""
-    path = _auth_path(settings)
-    if not path.is_file():
-        return
-    try:
-        existing = json.loads(path.read_text())
-        existing.pop("anthropic", None)
-        path.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
-        path.chmod(0o600)
-    except Exception:
-        pass
+    from .auth_store import clear_provider
+
+    clear_provider(_auth_path(settings), "anthropic")
 
 
 def get_access_token(settings) -> str:
     """Retorna access token válido, renovando e persistindo a rotação OAuth."""
+    from .auth_store import (
+        clear_provider_unlocked,
+        exclusive,
+        load_provider_unlocked,
+        save_provider_unlocked,
+    )
+
+    path = _auth_path(settings)
     tokens = load_tokens(settings)
     if not tokens:
         raise ValueError(
@@ -178,38 +168,47 @@ def get_access_token(settings) -> str:
     if tokens.get("expires", 0) > now_ms:
         return tokens["access"]
 
-    # Refresh tokens são rotativos e de uso único. Serializar e reler o arquivo
-    # evita que duas requisições deste processo tentem consumir o mesmo token.
+    # Lock cross-process no auth.json durante read→refresh→write.
+    # Refresh tokens Anthropic são rotativos e de uso único.
     with _REFRESH_LOCK:
-        tokens = load_tokens(settings)
-        if not tokens:
-            raise ValueError(
-                "Não autenticado com Anthropic OAuth. "
-                "Acesse a página Configurações para conectar."
-            )
-        now_ms = int(time.time() * 1000)
-        if tokens.get("expires", 0) > now_ms:
-            return tokens["access"]
-
-        try:
-            d = refresh(tokens["refresh"])
-        except RuntimeError as exc:
-            if "invalid_grant" in str(exc):
-                clear_tokens(settings)
+        with exclusive(path):
+            tokens = load_provider_unlocked(path, "anthropic")
+            if not tokens:
                 raise ValueError(
-                    "Sessão Claude expirada ou revogada. "
-                    "Reconecte sua conta na página Configurações."
-                ) from exc
-            raise
+                    "Não autenticado com Anthropic OAuth. "
+                    "Acesse a página Configurações para conectar."
+                )
+            now_ms = int(time.time() * 1000)
+            if tokens.get("expires", 0) > now_ms:
+                return tokens["access"]
 
-        account = d.get("account") or {}
-        tokens = {
-            "access": d["access_token"],
-            "refresh": d.get("refresh_token") or tokens["refresh"],
-            "expires": now_ms + d["expires_in"] * 1000 - _BUFFER_MS,
-            "email": account.get("email_address") or tokens.get("email"),
-            "account_id": account.get("uuid") or tokens.get("account_id"),
-        }
-        save_tokens(settings, tokens)
+            attempted_refresh = tokens.get("refresh")
+            try:
+                d = refresh(attempted_refresh)
+            except RuntimeError as exc:
+                if "invalid_grant" in str(exc):
+                    # Outro processo pode ter rotacionado com sucesso — só limpar
+                    # se o refresh em disco ainda for o que tentamos consumir.
+                    current = load_provider_unlocked(path, "anthropic")
+                    if current and current.get("refresh") != attempted_refresh:
+                        if current.get("expires", 0) > int(time.time() * 1000):
+                            return current["access"]
+                        # token novo mas já expirado — cair para erro genérico
+                    clear_provider_unlocked(path, "anthropic")
+                    raise ValueError(
+                        "Sessão Claude expirada ou revogada. "
+                        "Reconecte sua conta na página Configurações."
+                    ) from exc
+                raise
+
+            account = d.get("account") or {}
+            tokens = {
+                "access": d["access_token"],
+                "refresh": d.get("refresh_token") or tokens["refresh"],
+                "expires": now_ms + d["expires_in"] * 1000 - _BUFFER_MS,
+                "email": account.get("email_address") or tokens.get("email"),
+                "account_id": account.get("uuid") or tokens.get("account_id"),
+            }
+            save_provider_unlocked(path, "anthropic", tokens)
 
     return tokens["access"]
