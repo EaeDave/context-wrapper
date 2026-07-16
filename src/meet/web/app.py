@@ -56,6 +56,9 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]", "testserv
 _MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 # Store por db_path — schema/migrate só no primeiro open, não a cada request.
+# A mesma instância é reutilizada entre threads do FastAPI; o Store serializa
+# métodos públicos com RLock (sqlite3 não é seguro com transações sobrepostas
+# na mesma connection).
 _store_cache: dict[str, Store] = {}
 _store_lock = threading.Lock()
 

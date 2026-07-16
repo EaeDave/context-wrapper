@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import os
+import select
+import subprocess
 import tempfile
 import time
 from collections.abc import Callable
-import json
-import subprocess
 from pathlib import Path
 
 from .models import AudioTracks
@@ -22,6 +24,8 @@ _SPEECHNORM = "speechnorm=e=12.5:r=0.0001:l=1"
 _FFPROBE_TIMEOUT_S = 30.0
 _FFMPEG_MIN_TIMEOUT_S = 120.0
 _FFMPEG_DEFAULT_TIMEOUT_S = 600.0
+# Quanto esperar no select entre checagens de deadline (ffmpeg silencioso).
+_FFMPEG_POLL_S = 0.25
 
 
 def _ffprobe_run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -43,6 +47,26 @@ def _ffmpeg_timeout(duration: float | None) -> float:
         # 4× duração + margem, com piso; re-encode pesado de 2h não deve estourar cedo
         return max(_FFMPEG_MIN_TIMEOUT_S, duration * 4.0 + 60.0)
     return _FFMPEG_DEFAULT_TIMEOUT_S
+
+
+def _kill_process(proc: subprocess.Popen[bytes]) -> None:
+    if proc.poll() is not None:
+        return
+    proc.kill()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _ffmpeg_timeout_error(limit: float) -> RuntimeError:
+    return RuntimeError(
+        f"ffmpeg timeout após {limit:.0f}s — arquivo corrompido ou travado?"
+    )
 
 
 def probe_audio_streams(input_path: Path) -> int:
@@ -86,59 +110,85 @@ def _run_ffmpeg(
     """Executa ffmpeg e reporta avanço temporal quando a duração é conhecida.
 
     ``timeout`` em segundos; se omitido, deriva da duração do media.
+
+    Progress é lido com ``select`` + pipe non-blocking: se o ffmpeg fica mudo
+    (sem linhas novas), o deadline ainda mata o processo. Iterar ``for line in
+    stdout`` bloquearia para sempre nesse caso.
     """
     limit = timeout if timeout is not None else _ffmpeg_timeout(duration)
     deadline = time.monotonic() + limit
-    with tempfile.TemporaryFile(mode="w+") as errors:
+    with tempfile.TemporaryFile(mode="w+b") as errors:
         proc = subprocess.Popen(
             ["ffmpeg", "-y", "-progress", "pipe:1", "-nostats", *args],
             stdout=subprocess.PIPE,
             stderr=errors,
-            text=True,
         )
         assert proc.stdout is not None
+        fd = proc.stdout.fileno()
+        os.set_blocking(fd, False)
+        buf = b""
+        returncode: int | None = None
         try:
-            for line in proc.stdout:
-                if time.monotonic() > deadline:
-                    proc.kill()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    _kill_process(proc)
+                    raise _ffmpeg_timeout_error(limit)
+
+                ready, _, _ = select.select(
+                    [fd], [], [], min(_FFMPEG_POLL_S, remaining)
+                )
+                if ready:
                     try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                    raise RuntimeError(
-                        f"ffmpeg timeout após {limit:.0f}s — arquivo corrompido ou travado?"
-                    )
-                if not line.startswith("out_time_us=") or not duration or duration <= 0:
-                    continue
-                try:
-                    elapsed = int(line.split("=", 1)[1]) / 1_000_000
-                except ValueError:
-                    continue
-                if on_progress is not None:
-                    on_progress(min(elapsed / duration, 1.0))
+                        chunk = os.read(fd, 8192)
+                    except BlockingIOError:
+                        chunk = b""
+                    if chunk:
+                        buf += chunk
+                        while b"\n" in buf:
+                            raw, buf = buf.split(b"\n", 1)
+                            line = raw.decode("utf-8", errors="replace")
+                            if (
+                                not line.startswith("out_time_us=")
+                                or not duration
+                                or duration <= 0
+                            ):
+                                continue
+                            try:
+                                elapsed = int(line.split("=", 1)[1]) / 1_000_000
+                            except ValueError:
+                                continue
+                            if on_progress is not None:
+                                on_progress(min(elapsed / duration, 1.0))
+                    elif proc.poll() is not None:
+                        # EOF real (pipe fechado + processo terminou)
+                        break
+                elif proc.poll() is not None:
+                    # select timeout e processo já saiu — drena resto e sai
+                    while True:
+                        try:
+                            chunk = os.read(fd, 8192)
+                        except BlockingIOError:
+                            break
+                        if not chunk:
+                            break
+                        buf += chunk
+                    break
+
             remaining = max(0.1, deadline - time.monotonic())
             try:
                 returncode = proc.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                raise RuntimeError(
-                    f"ffmpeg timeout após {limit:.0f}s — arquivo corrompido ou travado?"
-                ) from None
+                _kill_process(proc)
+                raise _ffmpeg_timeout_error(limit) from None
         except Exception:
             if proc.poll() is None:
-                proc.kill()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+                _kill_process(proc)
             raise
         if returncode != 0:
             errors.seek(0)
-            raise RuntimeError(f"ffmpeg falhou: {errors.read()[-500:]}")
+            err_tail = errors.read()[-500:].decode("utf-8", errors="replace")
+            raise RuntimeError(f"ffmpeg falhou: {err_tail}")
     if on_progress is not None:
         on_progress(1.0)
 

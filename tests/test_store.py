@@ -132,6 +132,37 @@ def test_update_action_item_status_only_keeps_review_status(tmp_store: Store) ->
     assert after.action_items[0].review_status == "confirmed"
 
 
+def test_update_action_item_manual_review_status_persists(tmp_store: Store) -> None:
+    """Toggle de review humano não pode ser sobrescrito por revalidação automática."""
+    mid = tmp_store.save_meeting(
+        _meeting(
+            action_items=[
+                ActionItem(
+                    what="task",
+                    status="aberto",
+                    review_status="needs_review",
+                    evidence_quote="no match expected",
+                )
+            ],
+            segments=[TranscriptSegment(start=0, end=1, text="unrelated", speaker="A")],
+        ),
+        Path("/tmp/rv2.md"),
+    )
+    got = tmp_store.get_meeting(mid)
+    assert got and got.action_items[0].id is not None
+    item_id = got.action_items[0].id
+
+    assert tmp_store.update_action_item(item_id, {"review_status": "confirmed"})
+    after = tmp_store.get_meeting(mid)
+    assert after is not None
+    assert after.action_items[0].review_status == "confirmed"
+
+    assert tmp_store.update_action_item(item_id, {"review_status": "needs_review"})
+    after2 = tmp_store.get_meeting(mid)
+    assert after2 is not None
+    assert after2.action_items[0].review_status == "needs_review"
+
+
 def test_update_meeting_extract_preserves_done_status(tmp_store: Store) -> None:
     """Reextract não pode zerar status=feito / due de item casado por what+range."""
     mid = tmp_store.save_meeting(
