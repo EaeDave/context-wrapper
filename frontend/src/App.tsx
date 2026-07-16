@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route } from "react-router"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 
 import Layout from "@/components/layout"
+import ErrorBoundary from "@/components/error-boundary"
 import MeetingsPage from "@/pages/MeetingsPage"
 import NewMeetingPage from "@/pages/NewMeetingPage"
 import JobPage from "@/pages/JobPage"
@@ -11,6 +12,7 @@ import SettingsPage from "@/pages/SettingsPage"
 import TasksPage from "@/pages/TasksPage"
 import ProjectsPage from "@/pages/ProjectsPage"
 import ProjectDetailPage from "@/pages/ProjectDetailPage"
+import NotFoundPage from "@/pages/NotFoundPage"
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -24,21 +26,24 @@ const queryClient = new QueryClient({
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Routes>
-          <Route element={<Layout />}>
-            <Route index element={<MeetingsPage />} />
-            <Route path="new" element={<NewMeetingPage />} />
-            <Route path="jobs/:id" element={<JobPage />} />
-            <Route path="meetings/:id" element={<MeetingDetailPage />} />
-            <Route path="speakers" element={<SpeakersPage />} />
-            <Route path="settings" element={<SettingsPage />} />
-            <Route path="tasks" element={<TasksPage />} />
-            <Route path="projects" element={<ProjectsPage />} />
-            <Route path="projects/:id" element={<ProjectDetailPage />} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
+      <ErrorBoundary>
+        <BrowserRouter>
+          <Routes>
+            <Route element={<Layout />}>
+              <Route index element={<MeetingsPage />} />
+              <Route path="new" element={<NewMeetingPage />} />
+              <Route path="jobs/:id" element={<JobPage />} />
+              <Route path="meetings/:id" element={<MeetingDetailPage />} />
+              <Route path="speakers" element={<SpeakersPage />} />
+              <Route path="settings" element={<SettingsPage />} />
+              <Route path="tasks" element={<TasksPage />} />
+              <Route path="projects" element={<ProjectsPage />} />
+              <Route path="projects/:id" element={<ProjectDetailPage />} />
+              <Route path="*" element={<NotFoundPage />} />
+            </Route>
+          </Routes>
+        </BrowserRouter>
+      </ErrorBoundary>
     </QueryClientProvider>
   )
 }

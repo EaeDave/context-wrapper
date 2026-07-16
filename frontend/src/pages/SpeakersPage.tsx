@@ -95,8 +95,12 @@ export default function SpeakersPage() {
   })
 
   const renameMutation = useMutation({
-    mutationFn: ({ name, newName }: { name: string; newName: string }) =>
-      api.renameVoice(name, newName),
+    mutationFn: ({ name, newName }: { name: string; newName: string }) => {
+      if (/[/\\]/.test(newName)) {
+        return Promise.reject(new Error("Nome não pode conter / ou \\"))
+      }
+      return api.renameVoice(name, newName)
+    },
     onSuccess: (_data, { name, newName }) => {
       queryClient.invalidateQueries({ queryKey: ["speakers"] })
       queryClient.invalidateQueries({ queryKey: ["voice-usage"] })

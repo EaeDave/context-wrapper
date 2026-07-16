@@ -1,5 +1,8 @@
 import { Clock, CheckCircle2, AlertCircle } from "lucide-react"
-import type { MeetingFact } from "@/lib/types"
+import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { toast } from "sonner"
+import type { MeetingDetail, MeetingFact } from "@/lib/types"
+import * as api from "@/lib/api"
 import { formatTs } from "@/lib/format"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -38,10 +41,47 @@ const KIND_ORDER: MeetingFact["kind"][] = [
 
 interface MeetingFactsProps {
   facts: MeetingFact[]
+  meetingId?: number
   onSeek?: (seconds: number, quote?: string | null) => void
 }
 
-export function MeetingFacts({ facts, onSeek }: MeetingFactsProps) {
+export function MeetingFacts({ facts, meetingId, onSeek }: MeetingFactsProps) {
+  const queryClient = useQueryClient()
+  const reviewMutation = useMutation({
+    mutationFn: ({
+      id,
+      review_status,
+    }: {
+      id: number
+      review_status: MeetingFact["review_status"]
+    }) => api.updateMeetingFact(id, { review_status }),
+    onMutate: async ({ id, review_status }) => {
+      if (meetingId == null) return
+      await queryClient.cancelQueries({ queryKey: ["meeting", meetingId] })
+      const prev = queryClient.getQueryData<MeetingDetail>(["meeting", meetingId])
+      if (prev) {
+        queryClient.setQueryData<MeetingDetail>(["meeting", meetingId], {
+          ...prev,
+          facts: (prev.facts ?? []).map((f) =>
+            f.id === id ? { ...f, review_status } : f,
+          ),
+        })
+      }
+      return { prev }
+    },
+    onError: (_e, _v, ctx) => {
+      if (meetingId != null && ctx?.prev) {
+        queryClient.setQueryData(["meeting", meetingId], ctx.prev)
+      }
+      toast.error("Erro ao atualizar revisão do fato")
+    },
+    onSettled: () => {
+      if (meetingId != null) {
+        queryClient.invalidateQueries({ queryKey: ["meeting", meetingId] })
+      }
+    },
+  })
+
   if (facts.length === 0) return null
 
   // Group by kind, preserving order
@@ -82,17 +122,37 @@ export function MeetingFacts({ facts, onSeek }: MeetingFactsProps) {
 
                     {/* Metadata badges + timestamp */}
                     <div className="ml-5 flex flex-wrap items-center gap-1.5">
-                      <Badge
-                        variant="outline"
-                        className={cn(
-                          "h-4 px-1 text-[10px]",
+                      <button
+                        type="button"
+                        disabled={meetingId == null || reviewMutation.isPending}
+                        title={
                           fact.review_status === "confirmed"
-                            ? "border-green-500 text-green-700 dark:text-green-400"
-                            : "border-amber-500 text-amber-600 dark:text-amber-400",
-                        )}
+                            ? "Marcar como precisa revisar"
+                            : "Confirmar revisão humana"
+                        }
+                        onClick={() =>
+                          reviewMutation.mutate({
+                            id: fact.id,
+                            review_status:
+                              fact.review_status === "confirmed"
+                                ? "needs_review"
+                                : "confirmed",
+                          })
+                        }
+                        className="inline-flex disabled:opacity-50"
                       >
-                        {fact.review_status === "confirmed" ? "confirmado" : "revisar"}
-                      </Badge>
+                        <Badge
+                          variant="outline"
+                          className={cn(
+                            "h-4 cursor-pointer px-1 text-[10px]",
+                            fact.review_status === "confirmed"
+                              ? "border-green-500 text-green-700 dark:text-green-400"
+                              : "border-amber-500 text-amber-600 dark:text-amber-400",
+                          )}
+                        >
+                          {fact.review_status === "confirmed" ? "confirmado" : "revisar"}
+                        </Badge>
+                      </button>
                       <Badge
                         variant="outline"
                         className="h-4 px-1 text-[10px] text-muted-foreground"
