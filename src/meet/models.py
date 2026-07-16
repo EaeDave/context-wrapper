@@ -59,6 +59,18 @@ class AudioTracks:
 
 
 @dataclass
+class VisualEvidence:
+    """Frame persistido que sustenta contexto visual da reunião."""
+
+    timestamp: float
+    image_path: str
+    description: str
+    visible_text: list[str] = field(default_factory=list)
+    relevance: str = "medium"
+    id: int | None = None
+
+
+@dataclass
 class ActionItem:
     """Tarefa acionável extraída da reunião."""
 
@@ -77,6 +89,7 @@ class ActionItem:
     evidence_quote: str | None = None
     explicitness: str = "inferred"    # "explicit" | "inferred"
     review_status: str = "needs_review"  # "confirmed" | "needs_review"
+    visual_evidence: list[VisualEvidence] = field(default_factory=list)
 
 
 @dataclass
@@ -91,6 +104,7 @@ class MeetingFact:
     explicitness: str = "inferred"       # "explicit" | "inferred"
     review_status: str = "needs_review"  # "confirmed" | "needs_review"
     id: int | None = None
+    visual_evidence: list[VisualEvidence] = field(default_factory=list)
 
 
 @dataclass
@@ -106,6 +120,7 @@ class MeetingResult:
     action_items: list[ActionItem] = field(default_factory=list)
     facts: list[MeetingFact] = field(default_factory=list)
     segments: list[TranscriptSegment] = field(default_factory=list)
+    visual_evidence: list[VisualEvidence] = field(default_factory=list)
     # nome_resolvido → score de cosseno; só entradas casadas (label≠nome)
     speaker_matches: dict[str, float] = field(default_factory=dict)
     project_id: int | None = None

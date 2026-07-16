@@ -5,7 +5,7 @@
 
 ## Current business rule map
 
-- Pipeline, extração LLM por blocos, rastreabilidade de fatos/tarefas e responsabilidade pessoal → `README.md#regras-do-produto`, `src/meet/pipeline.py`, `src/meet/extract.py`, `tests/test_extract.py`, `tests/test_traceable.py`; **jobs internos:** `process`, `reprocess`, `reextract`.
+- Pipeline, análise visual opcional, extração LLM por blocos, rastreabilidade de fatos/tarefas e responsabilidade pessoal → `README.md#regras-do-produto`, `src/meet/pipeline.py`, `src/meet/visual.py`, `src/meet/extract.py`, `tests/test_extract.py`, `tests/test_visual.py`, `tests/test_traceable.py`; **jobs internos:** `process`, `reprocess`, `reextract`.
 - Projects Hub, associação de reuniões e filtros por projeto → `README.md#regras-do-produto`, `src/meet/store.py`, `src/meet/web/app.py`, `tests/test_projects.py`; **endpoints internos:** `/api/projects/*`, `/api/meetings/*`.
 - Task Studio, escopos pessoal/delegado e pacote canônico para outra LLM → `README.md#regras-do-produto`, `src/meet/store.py`, `src/meet/context_export.py`, `tests/test_context_export.py`; **endpoints internos:** `GET /api/tasks`, `POST /api/context/export`.
 - Job lifecycle, structured progress, and interruption recovery → `README.md#regras-do-produto`, `src/meet/progress.py`, `src/meet/web/jobs.py`, `tests/test_progress.py`, `tests/test_jobs.py`; **endpoints internos:** `/api/jobs/*`.
@@ -30,4 +30,5 @@
 - OAuth refresh is serialized inside the server process and credentials are re-read after acquiring the lock to avoid consuming one rotating token twice.
 - Progress is hybrid by design: report observed work inside measurable stages (including completed LLM blocks) and keep blocking operations such as a single LLM call or final consolidation indeterminate rather than deriving an ETA from historical guesses.
 - Model display names are presentation-only. Persist canonical provider IDs unchanged; an empty `llm_model` means automatic provider selection, not a copied default ID.
+- Visual analysis is best-effort: persist selected frames under `media/{meeting_id}/visual`, but preserve transcript-derived results when an individual frame, vision model, or multimodal transport is unavailable. Item/frame links are derived from evidence timestamps with a five-second margin so re-extraction does not leave fragile join rows. Claude Code CLI and ChatGPT/Codex OAuth remain text-only until their transports expose a stable image-input contract.
 <!-- business-readme:context:end -->

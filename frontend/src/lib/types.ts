@@ -55,6 +55,15 @@ export interface SearchResult {
   snippet: string        // com <mark>…</mark> do FTS
 }
 
+export interface VisualEvidence {
+  id: number
+  timestamp: number
+  thumbnail_url: string
+  description: string
+  visible_text: string[]
+  relevance: "high" | "medium" | "low"
+}
+
 export interface ActionItem {
   id: number
   what: string
@@ -70,6 +79,7 @@ export interface ActionItem {
   evidence_quote: string | null
   explicitness: "explicit" | "inferred"
   review_status: "confirmed" | "needs_review"
+  visual_evidence?: VisualEvidence[]
 }
 
 export interface MeetingFact {
@@ -81,6 +91,7 @@ export interface MeetingFact {
   evidence_quote: string | null
   explicitness: "explicit" | "inferred"
   review_status: "confirmed" | "needs_review"
+  visual_evidence?: VisualEvidence[]
 }
 
 export interface TranscriptGroup {
@@ -118,6 +129,7 @@ export interface MeetingDetail {
   project_id: number | null
   project_name: string | null
   facts?: MeetingFact[]
+  visual_evidence?: VisualEvidence[]
 }
 
 export interface BrowseEntry {
@@ -159,6 +171,7 @@ export interface ProcessRequest {
   others_track?: number
   num_speakers?: number  // nº de falantes remotos (0 = automático)
   no_llm?: boolean
+  analyze_visual?: boolean
   import_media?: boolean
   project_id?: number | null
 }

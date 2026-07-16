@@ -70,6 +70,7 @@ import { ActionItems } from "@/components/meeting/action-items"
 import { SpeakerAssign } from "@/components/meeting/speaker-assign"
 import { ManageCard } from "@/components/meeting/manage"
 import { MeetingFacts } from "@/components/meeting/meeting-facts"
+import { VisualEvidenceCard } from "@/components/meeting/visual-evidence"
 import { cn } from "@/lib/utils"
 
 // ─── Speaker colour convention (shared with Transcript) ───────────────────────
@@ -329,6 +330,7 @@ export default function MeetingDetailPage() {
   const [othersTrack, setOthersTrack] = useState(2)
   const [numSpeakers, setNumSpeakers] = useState(0)
   const [noLlm, setNoLlm] = useState(false)
+  const [analyzeVisual, setAnalyzeVisual] = useState(false)
 
   const { data: meeting, isLoading, error } = useQuery<MeetingDetail>({
     queryKey: ["meeting", meetingId],
@@ -392,6 +394,7 @@ export default function MeetingDetailPage() {
         mic_track: micTrack,
         others_track: othersTrack,
         no_llm: noLlm,
+        analyze_visual: analyzeVisual && !noLlm && Boolean(meeting?.has_video),
         num_speakers: numSpeakers || undefined,
       }),
     onSuccess: (job) => {
@@ -506,6 +509,13 @@ export default function MeetingDetailPage() {
         {/* Left column — content */}
         <main className="space-y-6 lg:col-start-1 lg:row-start-1">
           {meeting.summary && <SummaryCard summary={meeting.summary} />}
+
+          {meeting.visual_evidence && meeting.visual_evidence.length > 0 && (
+            <VisualEvidenceCard
+              items={meeting.visual_evidence}
+              onSeek={seekTo}
+            />
+          )}
 
           {meeting.pending.length > 0 && <SpeakerAssign meeting={meeting} />}
 
@@ -638,6 +648,25 @@ export default function MeetingDetailPage() {
               <Label htmlFor="no-llm" className="cursor-pointer font-normal">
                 Sem LLM (apenas transcrição)
               </Label>
+            </div>
+            <div className="flex items-start gap-2">
+              <Checkbox
+                id="reprocess-analyze-visual"
+                checked={analyzeVisual && !noLlm && Boolean(meeting?.has_video)}
+                disabled={noLlm || !meeting?.has_video}
+                onCheckedChange={(v) => setAnalyzeVisual(!!v)}
+              />
+              <div className="space-y-1">
+                <Label
+                  htmlFor="reprocess-analyze-visual"
+                  className="cursor-pointer font-normal"
+                >
+                  Analisar conteúdo da tela
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Frames relevantes são enviados ao provider configurado.
+                </p>
+              </div>
             </div>
           </div>
           <DialogFooter>

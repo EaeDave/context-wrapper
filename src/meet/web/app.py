@@ -141,6 +141,7 @@ class ProcessBody(BaseModel):
     mic_track: int = 1
     others_track: int = 2
     no_llm: bool = False
+    analyze_visual: bool = False
     import_media: bool = True
     num_speakers: int = 0
     project_id: int | None = None
@@ -224,6 +225,7 @@ class ReprocessBody(BaseModel):
     mic_track: int = 1
     others_track: int = 2
     no_llm: bool = False
+    analyze_visual: bool = False
     num_speakers: int = 0
 
 
@@ -341,6 +343,16 @@ def create_app() -> FastAPI:
         deleted = store.delete_meetings(clean, data_dir=settings.data_dir)
         return {"deleted": deleted}
 
+    def _visual_to_dict(meeting_id: int, evidence) -> dict:
+        return {
+            "id": evidence.id,
+            "timestamp": evidence.timestamp,
+            "thumbnail_url": f"/api/meetings/{meeting_id}/visual-evidence/{evidence.id}",
+            "description": evidence.description,
+            "visible_text": evidence.visible_text,
+            "relevance": evidence.relevance,
+        }
+
     @app.get("/api/meetings/{meeting_id}")
     def api_meeting_detail(meeting_id: int) -> dict:
         from ..audio import (
@@ -426,6 +438,10 @@ def create_app() -> FastAPI:
                     "evidence_quote": ai.evidence_quote,
                     "explicitness": ai.explicitness,
                     "review_status": ai.review_status,
+                    "visual_evidence": [
+                        _visual_to_dict(meeting_id, evidence)
+                        for evidence in ai.visual_evidence
+                    ],
                 }
                 for ai in result.action_items
             ],
@@ -439,8 +455,16 @@ def create_app() -> FastAPI:
                     "evidence_quote": f.evidence_quote,
                     "explicitness": f.explicitness,
                     "review_status": f.review_status,
+                    "visual_evidence": [
+                        _visual_to_dict(meeting_id, evidence)
+                        for evidence in f.visual_evidence
+                    ],
                 }
                 for f in result.facts
+            ],
+            "visual_evidence": [
+                _visual_to_dict(meeting_id, evidence)
+                for evidence in result.visual_evidence
             ],
             "pending": pending,
             "groups": groups,
@@ -448,6 +472,21 @@ def create_app() -> FastAPI:
             "project_id": result.project_id,
             "project_name": project.name if project else None,
         }
+
+    @app.get("/api/meetings/{meeting_id}/visual-evidence/{evidence_id}")
+    def api_visual_evidence(meeting_id: int, evidence_id: int) -> FileResponse:
+        settings, store = _settings_store()
+        row = store._conn.execute(
+            "SELECT image_path FROM visual_evidence WHERE id = ? AND meeting_id = ?",
+            (evidence_id, meeting_id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "Evidência visual não encontrada")
+        path = Path(row["image_path"]).resolve()
+        allowed = (settings.data_dir / "media" / str(meeting_id) / "visual").resolve()
+        if not path.is_relative_to(allowed) or not path.is_file():
+            raise HTTPException(404, "Arquivo da evidência visual não encontrado")
+        return FileResponse(path, media_type="image/jpeg")
 
     @app.patch("/api/meetings/{meeting_id}")
     def api_patch_meeting(meeting_id: int, body: PatchMeetingBody) -> dict:
@@ -631,6 +670,7 @@ def create_app() -> FastAPI:
             mic_track=body.mic_track,
             others_track=body.others_track,
             no_llm=body.no_llm,
+            analyze_visual=body.analyze_visual,
             num_speakers=body.num_speakers,
         )
         return _serialize_job(job)
@@ -667,6 +707,7 @@ def create_app() -> FastAPI:
             mic_track=body.mic_track,
             others_track=body.others_track,
             no_llm=body.no_llm,
+            analyze_visual=body.analyze_visual,
             import_media=body.import_media,
             num_speakers=body.num_speakers,
             project_id=body.project_id,

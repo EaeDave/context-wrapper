@@ -4,6 +4,7 @@ import { formatTs } from "@/lib/format"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
+import { EvidenceThumbnails } from "@/components/meeting/visual-evidence"
 
 // ── Kind labels & colours ──────────────────────────────────────────────────────
 const KIND_META: Record<
@@ -118,6 +119,14 @@ export function MeetingFacts({ facts, onSeek }: MeetingFactsProps) {
                       <p className="ml-5 text-[11px] italic text-muted-foreground border-l-2 border-muted pl-2 line-clamp-3">
                         {fact.evidence_quote}
                       </p>
+                    )}
+                    {fact.visual_evidence && fact.visual_evidence.length > 0 && (
+                      <div className="ml-5">
+                        <EvidenceThumbnails
+                          items={fact.visual_evidence}
+                          onSeek={(ts) => onSeek?.(ts, null)}
+                        />
+                      </div>
                     )}
                   </li>
                 ))}

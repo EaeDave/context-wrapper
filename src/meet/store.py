@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import ActionItem, MeetingFact, MeetingResult, TranscriptSegment
+from .models import ActionItem, MeetingFact, MeetingResult, TranscriptSegment, VisualEvidence
 
 
 _SCHEMA = """\
@@ -78,6 +78,16 @@ CREATE TABLE IF NOT EXISTS meeting_facts (
     evidence_quote TEXT,
     explicitness   TEXT    NOT NULL DEFAULT 'inferred',
     review_status  TEXT    NOT NULL DEFAULT 'needs_review'
+);
+
+CREATE TABLE IF NOT EXISTS visual_evidence (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id   INTEGER NOT NULL REFERENCES meetings(id),
+    timestamp    REAL    NOT NULL,
+    image_path   TEXT    NOT NULL,
+    description  TEXT    NOT NULL,
+    visible_text TEXT    NOT NULL DEFAULT '[]',
+    relevance    TEXT    NOT NULL DEFAULT 'medium'
 );
 
 """
@@ -192,6 +202,10 @@ class Store:
                 "CREATE INDEX IF NOT EXISTS idx_meeting_facts_meeting_id"
                 " ON meeting_facts(meeting_id)"
             )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_visual_evidence_meeting_time"
+                " ON visual_evidence(meeting_id, timestamp)"
+            )
 
     # ------------------------------------------------------------------
     # Reuniões
@@ -285,6 +299,60 @@ class Store:
 
         return meeting_id
 
+    def replace_visual_evidence(
+        self,
+        meeting_id: int,
+        evidence: list[VisualEvidence],
+        data_dir: Path,
+    ) -> list[VisualEvidence]:
+        """Substitui frames/metadados visuais e retorna paths canônicos."""
+        from .media import media_dir
+        import shutil
+
+        target_dir = media_dir(data_dir, meeting_id) / "visual"
+        staged: list[VisualEvidence] = []
+        if target_dir.is_dir():
+            shutil.rmtree(target_dir)
+        if evidence:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        for index, item in enumerate(sorted(evidence, key=lambda value: value.timestamp)):
+            source = Path(item.image_path)
+            if not source.is_file():
+                continue
+            target = target_dir / f"{index:03d}-{int(item.timestamp * 1000):010d}.jpg"
+            shutil.copy2(source, target)
+            staged.append(
+                VisualEvidence(
+                    timestamp=item.timestamp,
+                    image_path=str(target),
+                    description=item.description,
+                    visible_text=list(item.visible_text),
+                    relevance=item.relevance,
+                )
+            )
+
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM visual_evidence WHERE meeting_id = ?", (meeting_id,)
+            )
+            for item in staged:
+                cursor = self._conn.execute(
+                    "INSERT INTO visual_evidence"
+                    " (meeting_id, timestamp, image_path, description, visible_text, relevance)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        meeting_id,
+                        item.timestamp,
+                        item.image_path,
+                        item.description,
+                        json.dumps(item.visible_text, ensure_ascii=False),
+                        item.relevance,
+                    ),
+                )
+                item.id = cursor.lastrowid
+        return staged
+
+
     def get_meeting(self, meeting_id: int) -> MeetingResult | None:
         """Reconstrói MeetingResult; anexa attrs de mídia/md_path."""
         row = self._conn.execute(
@@ -356,6 +424,37 @@ class Store:
             )
         ]
 
+        visual_evidence = [
+            VisualEvidence(
+                id=r["id"],
+                timestamp=r["timestamp"],
+                image_path=r["image_path"],
+                description=r["description"],
+                visible_text=json.loads(r["visible_text"] or "[]"),
+                relevance=r["relevance"] or "medium",
+            )
+            for r in self._conn.execute(
+                "SELECT id, timestamp, image_path, description, visible_text, relevance"
+                " FROM visual_evidence WHERE meeting_id = ? ORDER BY timestamp, id",
+                (meeting_id,),
+            )
+        ]
+
+        def linked(start: float | None, end: float | None) -> list[VisualEvidence]:
+            if start is None:
+                return []
+            upper = end if end is not None else start
+            return [
+                evidence
+                for evidence in visual_evidence
+                if start - 5.0 <= evidence.timestamp <= upper + 5.0
+            ]
+
+        for item in action_items:
+            item.visual_evidence = linked(item.source_start, item.source_end)
+        for fact in facts:
+            fact.visual_evidence = linked(fact.source_start, fact.source_end)
+
         participants = sorted({s.speaker for s in segments if s.speaker})
 
         result = MeetingResult(
@@ -368,6 +467,7 @@ class Store:
             action_items=action_items,
             facts=facts,
             segments=segments,
+            visual_evidence=visual_evidence,
             speaker_matches=json.loads(row["speaker_matches"] or "{}"),
             project_id=row["project_id"],
         )
@@ -563,6 +663,9 @@ class Store:
             )
             self._conn.execute(
                 "DELETE FROM segments WHERE meeting_id = ?", (meeting_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM visual_evidence WHERE meeting_id = ?", (meeting_id,)
             )
             self._conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
 

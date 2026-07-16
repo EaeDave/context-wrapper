@@ -329,6 +329,7 @@ class JobManager:
                 mic_track=int(job.params.get("mic_track", 1)),
                 others_track=int(job.params.get("others_track", 2)),
                 no_llm=bool(job.params.get("no_llm", False)),
+                analyze_visual=bool(job.params.get("analyze_visual", False)),
                 import_media=bool(job.params.get("import_media", True)),
                 num_speakers=int(job.params.get("num_speakers", 0)),
                 on_progress=progress,
@@ -401,6 +402,7 @@ class JobManager:
                 mic_track=int(job.params.get("mic_track", 1)),
                 others_track=int(job.params.get("others_track", 2)),
                 no_llm=bool(job.params.get("no_llm", False)),
+                analyze_visual=bool(job.params.get("analyze_visual", False)),
                 num_speakers=int(job.params.get("num_speakers", 0)),
                 on_progress=progress,
             )

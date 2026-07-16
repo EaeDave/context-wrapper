@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
-from .models import ActionItem, MeetingResult
+from .models import ActionItem, MeetingResult, VisualEvidence
 from .progress import ProgressCallback, ProgressTracker, StepSpec
 from .store import Store
 
@@ -52,6 +52,7 @@ def run_pipeline(
     mic_track: int = 1,
     others_track: int = 2,
     no_llm: bool = False,
+    analyze_visual: bool = False,
     keep_wav: bool = False,
     import_media: bool = True,
     today: str | None = None,
@@ -75,6 +76,7 @@ def run_pipeline(
             mic_track=mic_track,
             others_track=others_track,
             no_llm=no_llm,
+            analyze_visual=analyze_visual,
             import_media=import_media,
             settings=settings,
             store=store,
@@ -95,6 +97,7 @@ def _analyse(
     mic_track: int,
     others_track: int,
     no_llm: bool,
+    analyze_visual: bool = False,
     settings: Settings,
     store: Store,
     workdir: Path,
@@ -253,15 +256,66 @@ def _analyse(
         )
         from . import extract as extract_mod
 
+        visual_observations: list[dict] = []
+        if analyze_visual:
+            try:
+                from . import visual as visual_mod
+
+                tracker.update(None, "Selecionando evidências visuais")
+                frames = visual_mod.extract_relevant_frames(
+                    video,
+                    segments,
+                    tracks.duration,
+                    workdir / "visual-frames",
+                )
+                if frames:
+                    tracker.update(None, f"Analisando {len(frames)} evidências visuais")
+                    visual_observations = extract_mod.analyze_visual_frames(
+                        extract_mod.get_provider(settings), frames, segments
+                    )
+            except Exception:
+                # Visão é enriquecimento best-effort; transcript continua sendo a fonte base.
+                visual_observations = []
+
         try:
+            extract_kwargs: dict[str, Any] = {"on_progress": tracker.update}
+            if visual_observations:
+                extract_kwargs["visual_observations"] = visual_observations
             summary, action_items, suggested_title, facts = extract_mod.extract(
                 segments,
                 participants,
                 settings,
-                on_progress=tracker.update,
+                **extract_kwargs,
             )
         except Exception as exc:
             raise RuntimeError(f"Erro na extração LLM: {exc}") from exc
+
+    visual_evidence = [
+        VisualEvidence(
+            timestamp=float(observation["timestamp"]),
+            image_path=str(observation["image_path"]),
+            description=str(observation["description"]),
+            visible_text=list(observation.get("visible_text") or []),
+            relevance=str(observation.get("relevance") or "medium"),
+        )
+        for observation in (visual_observations if not no_llm else [])
+        if observation.get("image_path")
+    ]
+
+    def linked(start: float | None, end: float | None) -> list[VisualEvidence]:
+        if start is None:
+            return []
+        upper = end if end is not None else start
+        return [
+            evidence
+            for evidence in visual_evidence
+            if start - 5.0 <= evidence.timestamp <= upper + 5.0
+        ]
+
+    for item in action_items:
+        item.visual_evidence = linked(item.source_start, item.source_end)
+    for fact in facts if not no_llm else []:
+        fact.visual_evidence = linked(fact.source_start, fact.source_end)
 
     meeting_title = title or suggested_title or video.stem
     result = MeetingResult(
@@ -274,6 +328,7 @@ def _analyse(
         action_items=action_items,
         facts=facts if not no_llm else [],
         segments=segments,
+        visual_evidence=visual_evidence,
         speaker_matches=speaker_matches,
     )
     return result, embeddings, unresolved
@@ -303,6 +358,7 @@ def _run(
     mic_track: int,
     others_track: int,
     no_llm: bool,
+    analyze_visual: bool,
     import_media: bool,
     settings: Settings,
     store: Store,
@@ -319,6 +375,7 @@ def _run(
         mic_track=mic_track,
         others_track=others_track,
         no_llm=no_llm,
+        analyze_visual=analyze_visual,
         settings=settings,
         store=store,
         workdir=workdir,
@@ -334,6 +391,9 @@ def _run(
     md_path = settings.output_dir / filename
     md_path.write_text(md_content, encoding="utf-8")
     meeting_id = store.save_meeting(result, md_path, project_id=project_id)
+    result.visual_evidence = store.replace_visual_evidence(
+        meeting_id, result.visual_evidence, settings.data_dir
+    )
     _save_pending(meeting_id, embeddings, unresolved, settings.data_dir)
     tracker.update(1.0, "Reunião salva")
 
@@ -364,6 +424,7 @@ def reprocess_meeting(
     mic_track: int = 1,
     others_track: int = 2,
     no_llm: bool = False,
+    analyze_visual: bool = False,
     on_progress: ProgressCallback | None = None,
     num_speakers: int = 0,
 ) -> MeetingResult:
@@ -387,12 +448,16 @@ def reprocess_meeting(
             mic_track=mic_track,
             others_track=others_track,
             no_llm=no_llm,
+            analyze_visual=analyze_visual,
             settings=settings,
             store=store,
             workdir=workdir,
             today=existing.date,
             tracker=tracker,
             num_speakers=num_speakers,
+        )
+        result.visual_evidence = store.replace_visual_evidence(
+            meeting_id, result.visual_evidence, settings.data_dir
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

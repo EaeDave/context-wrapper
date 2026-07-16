@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 
@@ -97,6 +99,7 @@ REGRAS DE RASTREABILIDADE:
 - evidence_quote: copie literalmente o trecho mais curto que justifica o fato/tarefa; null se não houver trecho claro.
 - explicitness: "explicit" quando mencionado diretamente; "inferred" quando deduzido por contexto.
 - assigned_to: array JSON de responsáveis (use "me" para o dono das notas); null se indefinido. Inclua TODAS as tarefas, inclusive atribuídas a terceiros.
+- Linhas marcadas como TELA são observações visuais associadas ao timestamp; use-as para detalhar resumo, fatos e tarefas, mas nunca as copie como evidence_quote da fala.
 - Não invente timestamps, citações ou responsáveis.
 - Cada fato ou tarefa distinta deve aparecer uma única vez; não repita itens.
 """
@@ -139,6 +142,7 @@ Schema exato:
   ]
 }
 
+- Linhas marcadas como TELA são observações visuais; use-as para nomes de telas, campos, mensagens e estado do produto, sem tratá-las como citação falada.
 Não invente timestamps, responsáveis ou citações.
 Não repita decisões, requisitos, restrições, questões ou tarefas.
 """
@@ -216,9 +220,37 @@ def _anthropic_post_with_retry(
 
 
 
+@dataclass(frozen=True)
+class ImageContent:
+    """Imagem JPEG temporária acompanhada do timestamp da reunião."""
+
+    path: Path
+    timestamp: float
+
+
+def _image_base64(image: ImageContent) -> str:
+    return base64.b64encode(image.path.read_bytes()).decode("ascii")
+
+
+_VISUAL_SYSTEM_PROMPT = """\
+Você analisa capturas de tela de uma reunião de demonstração de produto.
+Relacione cada imagem ao timestamp informado e retorne SOMENTE JSON válido:
+{"observations":[{"timestamp":"HH:MM:SS","description":"descrição objetiva do estado da interface","visible_text":["texto literal relevante"],"relevance":"high|medium|low"}]}
+
+Priorize telas, campos, botões, erros, estados antes/depois e detalhes que esclareçam
+o transcript. Ignore webcam, papel de parede, barras do sistema e imagens sem valor.
+Não deduza ações, decisões ou requisitos nesta etapa. Não invente texto ilegível.
+"""
+
+
 class LLMProvider(ABC):
     @abstractmethod
     def complete(self, system: str, user: str) -> str: ...
+
+    def complete_with_images(
+        self, system: str, user: str, images: list[ImageContent]
+    ) -> str:
+        raise NotImplementedError("O provider/modelo configurado não aceita imagens.")
 
 
 class AnthropicProvider(LLMProvider):
@@ -240,6 +272,39 @@ class AnthropicProvider(LLMProvider):
             block.text
             for block in msg.content
             if getattr(block, "type", None) == "text"
+        )
+        return _complete_provider_text(text, msg.stop_reason)
+
+    def complete_with_images(
+        self, system: str, user: str, images: list[ImageContent]
+    ) -> str:
+        import anthropic
+
+        content: list[dict] = []
+        for image in images:
+            content.extend(
+                [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": _image_base64(image),
+                        },
+                    },
+                    {"type": "text", "text": f"Timestamp {_fmt_timestamp(image.timestamp)}"},
+                ]
+            )
+        content.append({"type": "text", "text": user})
+        client = anthropic.Anthropic(api_key=self._api_key)
+        msg = client.messages.create(
+            model=self._model,
+            max_tokens=4096,
+            system=system,
+            messages=[{"role": "user", "content": content}],
+        )
+        text = "".join(
+            block.text for block in msg.content if getattr(block, "type", None) == "text"
         )
         return _complete_provider_text(text, msg.stop_reason)
 
@@ -265,6 +330,37 @@ class OpenAIProvider(LLMProvider):
             choice.message.content or "",
             choice.finish_reason,
         )
+
+    def complete_with_images(
+        self, system: str, user: str, images: list[ImageContent]
+    ) -> str:
+        import openai
+
+        content: list[dict] = []
+        for image in images:
+            content.extend(
+                [
+                    {"type": "text", "text": f"Timestamp {_fmt_timestamp(image.timestamp)}"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{_image_base64(image)}",
+                            "detail": "low",
+                        },
+                    },
+                ]
+            )
+        content.append({"type": "text", "text": user})
+        client = openai.OpenAI(api_key=self._api_key)
+        response = client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": content},
+            ],
+        )
+        choice = response.choices[0]
+        return _complete_provider_text(choice.message.content or "", choice.finish_reason)
 
 
 
@@ -425,6 +521,32 @@ class OllamaProvider(LLMProvider):
             data.get("done_reason"),
         )
 
+    def complete_with_images(
+        self, system: str, user: str, images: list[ImageContent]
+    ) -> str:
+        labels = "\n".join(
+            f"Imagem {index + 1}: timestamp {_fmt_timestamp(image.timestamp)}"
+            for index, image in enumerate(images)
+        )
+        payload = {
+            "model": self._model,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": f"{labels}\n\n{user}",
+                    "images": [_image_base64(image) for image in images],
+                },
+            ],
+        }
+        response = httpx.post(f"{self._url}/api/chat", json=payload, timeout=300.0)
+        response.raise_for_status()
+        data = response.json()
+        return _complete_provider_text(
+            data.get("message", {}).get("content", ""), data.get("done_reason")
+        )
+
 
 class ClaudeCodeProvider(LLMProvider):
     """Usa o CLI do Claude Code (`claude -p`) — consome a assinatura, não a API."""
@@ -500,6 +622,58 @@ class AnthropicOAuthProvider(LLMProvider):
         data = resp.json()
         parts = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
         return _complete_provider_text("".join(parts), data.get("stop_reason"))
+
+    def complete_with_images(
+        self, system: str, user: str, images: list[ImageContent]
+    ) -> str:
+        from .anthropic_oauth import _check_response, get_access_token
+
+        access = get_access_token(self._settings)
+        content: list[dict] = []
+        for image in images:
+            content.extend(
+                [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": _image_base64(image),
+                        },
+                    },
+                    {"type": "text", "text": f"Timestamp {_fmt_timestamp(image.timestamp)}"},
+                ]
+            )
+        content.append({"type": "text", "text": user})
+        headers = {
+            "Authorization": f"Bearer {access}",
+            "anthropic-beta": "oauth-2025-04-20,claude-code-20250219",
+            "anthropic-version": "2023-06-01",
+            "User-Agent": "claude-cli/2.0.0 (external, cli)",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self._model,
+            "max_tokens": 4096,
+            "system": [
+                {"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."},
+                {"type": "text", "text": system},
+            ],
+            "messages": [{"role": "user", "content": content}],
+        }
+        with httpx.Client(timeout=300) as client:
+            response = _anthropic_post_with_retry(
+                client,
+                "https://api.anthropic.com/v1/messages",
+                payload=payload,
+                headers=headers,
+            )
+            _check_response(response)
+        data = response.json()
+        text = "".join(
+            block["text"] for block in data.get("content", []) if block.get("type") == "text"
+        )
+        return _complete_provider_text(text, data.get("stop_reason"))
 
 
 
@@ -650,15 +824,9 @@ def _split_transcript(
 
 
 def _parse_json_response(text: str) -> dict:
-    """Extrai o primeiro objeto JSON da resposta do LLM.
-
-    Tenta: bloco ```json ... ```, depois primeiro { até último }.
-    Levanta ValueError com o texto bruto se não conseguir.
-    """
-    # Verifica se há fence ```json ou ```
+    """Extrai o primeiro objeto JSON da resposta do LLM."""
     fenced = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
     candidate_text = fenced.group(1) if fenced else text
-
     start = candidate_text.find("{")
     end = candidate_text.rfind("}")
     if start != -1 and end != -1 and end > start:
@@ -669,8 +837,85 @@ def _parse_json_response(text: str) -> dict:
                 return result
         except json.JSONDecodeError:
             pass
-
     raise ValueError(text)
+
+
+def analyze_visual_frames(
+    provider: LLMProvider,
+    frames: list[object],
+    segments: list[TranscriptSegment],
+) -> list[dict]:
+    """Descreve frames em lotes pequenos; provider sem visão degrada para []."""
+    images = [
+        ImageContent(path=Path(str(frame.path)), timestamp=float(frame.timestamp))
+        for frame in frames
+        if Path(str(frame.path)).is_file()
+    ]
+    if not images:
+        return []
+
+    observations: list[dict] = []
+    try:
+        for batch_start in range(0, len(images), 6):
+            batch = images[batch_start : batch_start + 6]
+            window_start = max(batch[0].timestamp - 15.0, 0.0)
+            window_end = batch[-1].timestamp + 15.0
+            transcript = _build_transcript(
+                [
+                    segment
+                    for segment in segments
+                    if segment.end >= window_start and segment.start <= window_end
+                ]
+            )
+            response = provider.complete_with_images(
+                _VISUAL_SYSTEM_PROMPT,
+                f"Transcript próximo às imagens:\n{transcript or '(sem fala próxima)'}",
+                batch,
+            )
+            data = _parse_json_response(response)
+            for raw in data.get("observations") or []:
+                if not isinstance(raw, dict) or not raw.get("description"):
+                    continue
+                timestamp = _parse_hms(raw.get("timestamp"))
+                if timestamp is None:
+                    continue
+                observations.append(
+                    {
+                        "timestamp": timestamp,
+                        "description": str(raw["description"]).strip(),
+                        "visible_text": [
+                            str(value).strip()
+                            for value in (raw.get("visible_text") or [])
+                            if str(value).strip()
+                        ],
+                        "relevance": raw.get("relevance") or "medium",
+                        "image_path": str(
+                            min(
+                                images,
+                                key=lambda image: abs(image.timestamp - timestamp),
+                            ).path
+                        ),
+                    }
+                )
+    except (NotImplementedError, ValueError, RuntimeError, httpx.HTTPError):
+        return []
+    return observations
+
+
+def _render_visual_context(observations: list[dict], start: float, end: float) -> str:
+    lines: list[str] = []
+    for observation in observations:
+        timestamp = float(observation.get("timestamp", -1.0))
+        if timestamp < start or timestamp > end:
+            continue
+        visible = ", ".join(observation.get("visible_text") or [])
+        suffix = f" · texto visível: {visible}" if visible else ""
+        lines.append(
+            f"[{_fmt_timestamp(timestamp)}] TELA: {observation['description']}{suffix}"
+        )
+    return "\n".join(lines)
+
+
 def _action_item_is_for_owner(d: dict) -> bool:
     """True se a tarefa pertence ao dono (me) ou não tem responsável definido.
 
@@ -1007,6 +1252,7 @@ def _analyse_chunks(
     segments: list[TranscriptSegment],
     participants: list[str],
     on_progress: ExtractionProgressCallback | None = None,
+    visual_observations: list[dict] | None = None,
 ) -> dict:
     chunks = _split_transcript(segments)
     analyses: list[dict] = []
@@ -1020,10 +1266,14 @@ def _analyse_chunks(
                 chunk.index / operation_count,
                 f"Analisando bloco {block_number} de {len(chunks)}",
             )
+        visual_context = _render_visual_context(
+            visual_observations or [], chunk.start, chunk.end
+        )
         user = (
             f"BLOCO {block_number}/{len(chunks)} · intervalo absoluto "
             f"{_fmt_timestamp(chunk.start)}-{_fmt_timestamp(chunk.end)}\n"
             f"Participantes identificados: {participants_text}\n\n{chunk.text}"
+            + (f"\n\nCONTEXTO VISUAL:\n{visual_context}" if visual_context else "")
         )
         analyses.append(
             {
@@ -1133,6 +1383,7 @@ def extract(
     participants: list[str],
     settings: Settings,
     on_progress: ExtractionProgressCallback | None = None,
+    visual_observations: list[dict] | None = None,
 ) -> tuple[str, list[ActionItem], str, list[MeetingFact]]:
     """Extrai reunião curta em uma chamada; reunião longa via map-reduce temporal.
 
@@ -1148,10 +1399,16 @@ def extract(
             on_progress(None, "Gerando resumo e tarefas com LLM")
         part_str = ", ".join(participants) if participants else "não identificados"
         system = _SYSTEM_PROMPT.replace("__PARTICIPANTS__", part_str)
-        data = _complete_json(provider, system, transcript)
+        visual_context = _render_visual_context(visual_observations or [], 0.0, duration)
+        user = transcript + (
+            f"\n\nCONTEXTO VISUAL:\n{visual_context}" if visual_context else ""
+        )
+        data = _complete_json(provider, system, user)
         if on_progress is not None:
             on_progress(1.0, "Resumo e tarefas gerados")
     else:
-        data = _analyse_chunks(provider, segments, participants, on_progress)
+        data = _analyse_chunks(
+            provider, segments, participants, on_progress, visual_observations
+        )
 
     return _result_from_data(data, segments)

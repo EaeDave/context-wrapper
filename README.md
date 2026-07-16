@@ -18,6 +18,16 @@ gravação (OBS) ──> wav 16k ──> transcrição + diarização ──> LL
   vozes, extrai resumo/action items, salva o resultado e, por padrão, importa a
   mídia. A opção “Sem LLM” mantém transcrição e diarização, sem resumo nem
   action items. **Job interno:** `process`; **endpoint interno:** `POST /api/process`.
+- A análise de tela é opcional. Quando habilitada em uma gravação com vídeo, o
+  pipeline prioriza momentos em que a fala referencia a interface, acrescenta
+  amostras periódicas de segurança, remove telas quase idênticas e envia apenas
+  os frames selecionados ao provider configurado. As evidências usadas ficam
+  persistidas na reunião: uma galeria mostra thumbnail, timestamp, descrição e
+  texto visível; tarefas e fatos exibem as imagens temporalmente vinculadas.
+  Clicar em qualquer thumbnail leva o player ao instante correspondente. Falha
+  em um frame ou transporte sem imagens degrada para o transcript. **Jobs
+  internos:** `process`, `reprocess`; **endpoint interno:** `POST /api/process`;
+  **integrações externas:** Anthropic, OpenAI ou Ollama com modelo visual.
 - A extração preserva todas as tarefas discutidas, inclusive as atribuídas só a
   terceiros, e separa quem pediu de quem executará. Também registra decisões,
   requisitos, restrições e questões em aberto. Tarefas e fatos guardam o trecho
@@ -133,6 +143,11 @@ llm_model = ""              # vazio = modelo padrão/disponível do provider
 Os mesmos valores podem ser escolhidos visualmente em **Configurações → Provider
 LLM**. Modelo “Automático” acompanha o catálogo do provider; IDs customizados
 continuam aceitos para modelos novos ou locais.
+
+A opção **Analisar conteúdo da tela** aparece ao processar ou reprocessar uma
+gravação com vídeo. Ela envia frames relevantes ao provider; Anthropic por API
+key/OAuth, OpenAI por API key e Ollama com modelo vision são suportados neste
+MVP. Claude Code CLI e ChatGPT/Codex OAuth continuam com extração textual.
 
 ### 3. OBS multi-track (recomendado)
 

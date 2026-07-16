@@ -209,7 +209,13 @@ export const updateTurn = (
 
 export const reprocessMeeting = (
   meetingId: number,
-  body: { mic_track?: number; others_track?: number; no_llm?: boolean; num_speakers?: number },
+  body: {
+    mic_track?: number
+    others_track?: number
+    no_llm?: boolean
+    analyze_visual?: boolean
+    num_speakers?: number
+  },
 ): Promise<Job> =>
   request("POST", `/api/meetings/${meetingId}/reprocess`, body)
 

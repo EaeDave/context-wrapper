@@ -6,6 +6,7 @@ import type { ActionItem, MeetingDetail } from "@/lib/types"
 import * as api from "@/lib/api"
 import { copyToClipboard } from "@/lib/utils"
 import { formatTs } from "@/lib/format"
+import { EvidenceThumbnails } from "@/components/meeting/visual-evidence"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -306,6 +307,12 @@ export function ActionItems({ meetingId, items, onSeek }: ActionItemsProps) {
                       <p className="mt-1 text-[11px] italic text-muted-foreground line-clamp-2 border-l-2 border-muted pl-2">
                         {item.evidence_quote}
                       </p>
+                    )}
+                    {item.visual_evidence && item.visual_evidence.length > 0 && (
+                      <EvidenceThumbnails
+                        items={item.visual_evidence}
+                        onSeek={(ts) => onSeek?.(ts, null)}
+                      />
                     )}
                   </TableCell>
                   <TableCell className="text-sm text-muted-foreground">

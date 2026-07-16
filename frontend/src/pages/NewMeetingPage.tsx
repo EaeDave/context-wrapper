@@ -78,6 +78,7 @@ export default function NewMeetingPage() {
   const [numSpeakers, setNumSpeakers] = useState("")
   const [importMedia, setImportMedia] = useState(true)
   const [noLlm, setNoLlm] = useState(false)
+  const [analyzeVisual, setAnalyzeVisual] = useState(false)
 
   const { data: browse, isLoading: browseLoading } = useQuery({
     queryKey: ["browse", currentPath ?? ""],
@@ -94,6 +95,8 @@ export default function NewMeetingPage() {
     retry: false,
   })
   const singleTrack = probeInfo != null && probeInfo.audio_streams < 2
+  const visualAnalysisDisabled =
+    noLlm || (probeInfo != null && probeInfo.video_streams < 1)
 
   const { data: projects = [] } = useQuery({
     queryKey: ["projects"],
@@ -111,6 +114,7 @@ export default function NewMeetingPage() {
         num_speakers: numSpeakers.trim() ? Number(numSpeakers) : 0,
         import_media: importMedia,
         no_llm: noLlm,
+        analyze_visual: analyzeVisual && !visualAnalysisDisabled,
         project_id:
           selectedProjectId === "none" ? undefined : Number(selectedProjectId),
       }),
@@ -414,6 +418,30 @@ export default function NewMeetingPage() {
                 >
                   Sem LLM (só transcrição)
                 </Label>
+              </div>
+              <div className="flex items-start gap-2.5">
+                <Checkbox
+                  id="analyze-visual"
+                  checked={analyzeVisual && !visualAnalysisDisabled}
+                  disabled={visualAnalysisDisabled}
+                  onCheckedChange={(v) => setAnalyzeVisual(v === true)}
+                />
+                <div className="space-y-1">
+                  <Label
+                    htmlFor="analyze-visual"
+                    className={cn(
+                      "font-normal",
+                      visualAnalysisDisabled
+                        ? "cursor-not-allowed text-muted-foreground"
+                        : "cursor-pointer",
+                    )}
+                  >
+                    Analisar conteúdo da tela
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    Frames relevantes são enviados ao provider configurado.
+                  </p>
+                </div>
               </div>
             </div>
 
