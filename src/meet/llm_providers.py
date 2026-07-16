@@ -81,9 +81,6 @@ def _anthropic_post_with_retry(
         raise last_error
     raise AssertionError("retry HTTP sem resposta ou erro")
 
-
-
-
 @dataclass(frozen=True)
 class ImageContent:
     """Imagem JPEG temporária acompanhada do timestamp da reunião."""
@@ -96,15 +93,6 @@ def _image_base64(image: ImageContent) -> str:
     return base64.b64encode(image.path.read_bytes()).decode("ascii")
 
 
-_VISUAL_SYSTEM_PROMPT = """\
-Você analisa capturas de tela de uma reunião de demonstração de produto.
-Relacione cada imagem ao timestamp informado e retorne SOMENTE JSON válido:
-{"observations":[{"timestamp":"HH:MM:SS","description":"descrição objetiva do estado da interface","visible_text":["texto literal relevante"],"relevance":"high|medium|low"}]}
-
-Priorize telas, campos, botões, erros, estados antes/depois e detalhes que esclareçam
-o transcript. Ignore webcam, papel de parede, barras do sistema e imagens sem valor.
-Não deduza ações, decisões ou requisitos nesta etapa. Não invente texto ilegível.
-"""
 
 
 class LLMProvider(ABC):

@@ -8,6 +8,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
+
 from .config import Settings
 from .llm_providers import (
     AnthropicOAuthProvider,
@@ -48,6 +50,16 @@ _MAX_OUTPUT_TOKENS = 16_384
 _MAX_SINGLE_CALL_SECONDS = 10 * 60
 _CHUNK_MAX_SECONDS = 8 * 60
 ExtractionProgressCallback = Callable[[float | None, str], None]
+
+_VISUAL_SYSTEM_PROMPT = """\
+Você analisa capturas de tela de uma reunião de demonstração de produto.
+Relacione cada imagem ao timestamp informado e retorne SOMENTE JSON válido:
+{"observations":[{"timestamp":"HH:MM:SS","description":"descrição objetiva do estado da interface","visible_text":["texto literal relevante"],"relevance":"high|medium|low"}]}
+
+Priorize telas, campos, botões, erros, estados antes/depois e detalhes que esclareçam
+o transcript. Ignore webcam, papel de parede, barras do sistema e imagens sem valor.
+Não deduza ações, decisões ou requisitos nesta etapa. Não invente texto ilegível.
+"""
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 429})
 _MATCH_STOPWORDS = frozenset(
     {
