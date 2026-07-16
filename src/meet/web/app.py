@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import mimetypes
+import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Annotated, AsyncGenerator, Literal
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 
-from ..config import hf_token_source, load_settings, save_local_settings
+from ..config import CONFIG_PATH, hf_token_source, load_settings, save_local_settings
 from ..progress import ProgressUpdate
 from ..model_catalog import get_model_catalog
 from ..store import Store
@@ -45,10 +50,189 @@ QUICK_DIRS = [
     Path.home() / "reunioes",
 ]
 
+# Hosts loopback aceitos (mitiga DNS rebinding). MEET_ALLOW_REMOTE=1 relaxa.
+# testserver = Starlette/FastAPI TestClient (não é vetor de rebinding real)
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]", "testserver"})
+_MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+# Store por db_path — schema/migrate só no primeiro open, não a cada request.
+_store_cache: dict[str, Store] = {}
+_store_lock = threading.Lock()
+
+
+def _get_store(settings) -> Store:
+    key = str(Path(settings.db_path).expanduser().resolve())
+    with _store_lock:
+        store = _store_cache.get(key)
+        if store is None:
+            store = Store(settings.db_path)
+            _store_cache[key] = store
+        return store
+
 
 def _settings_store():
     settings = load_settings()
-    return settings, Store(settings.db_path)
+    return settings, _get_store(settings)
+
+
+def _allow_remote() -> bool:
+    return os.environ.get("MEET_ALLOW_REMOTE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _normalize_host(host_header: str) -> str:
+    host = (host_header or "").split(",")[0].strip().lower()
+    if not host:
+        return ""
+    # IPv6 com porta: [2001:db8::1]:8741
+    if host.startswith("["):
+        end = host.find("]")
+        if end != -1:
+            return host[1:end]
+        return host.strip("[]")
+    # host:port
+    if host.count(":") == 1:
+        return host.rsplit(":", 1)[0]
+    return host
+
+
+def _host_is_allowed(host_header: str) -> bool:
+    if _allow_remote():
+        return True
+    host = _normalize_host(host_header)
+    if not host:
+        return False
+    if host in _LOOPBACK_HOSTS:
+        return True
+    # *.localhost (RFC 6761)
+    return host.endswith(".localhost")
+
+
+def _peer_is_loopback(request: Request) -> bool:
+    """Exige que o socket peer seja loopback (não só o header Host)."""
+    if _allow_remote():
+        return True
+    client = request.client
+    if client is None:
+        # ASGI sem client (alguns testes) — Host loopback já foi checado.
+        return True
+    host = (client.host or "").strip().lower()
+    # Starlette TestClient usa "testclient"
+    if host in {"testclient", "testserver", "localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _origin_host(origin: str) -> str | None:
+    try:
+        parsed = urlparse(origin)
+    except Exception:
+        return None
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return _normalize_host(parsed.netloc)
+
+
+def _path_under(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _sensitive_roots(settings) -> list[Path]:
+    roots = [
+        Path(settings.data_dir).expanduser().resolve(),
+        CONFIG_PATH.parent.resolve(),
+    ]
+    # data_dir padrão se settings apontar outro lugar — ainda bloquear o default
+    default = (Path.home() / ".local" / "share" / "meet").resolve()
+    if default not in roots:
+        roots.append(default)
+    return roots
+
+
+def _assert_user_media_path(path: str, *, for_browse: bool = False) -> Path:
+    """Resolve path sob $HOME e fora de data_dir/config (tokens, db, settings)."""
+    settings = load_settings()
+    raw = Path(path).expanduser() if path else Path.home()
+    try:
+        p = raw.resolve()
+    except OSError as exc:
+        raise HTTPException(400, "Caminho inválido") from exc
+
+    home = Path.home().resolve()
+    if not _path_under(p, home) and p != home:
+        raise HTTPException(403, "Acesso fora do home negado")
+
+    for root in _sensitive_roots(settings):
+        if p == root or _path_under(p, root):
+            raise HTTPException(403, "Acesso a dados internos do meet negado")
+
+    # Arquivos sensíveis mesmo se data_dir foi customizado para fora do default
+    if not for_browse and p.is_file():
+        name = p.name.lower()
+        if name in {"auth.json", "settings.local.json", "meet.db", "config.toml"}:
+            raise HTTPException(403, "Acesso a dados internos do meet negado")
+        if name.endswith(".db") and "meet" in name:
+            raise HTTPException(403, "Acesso a dados internos do meet negado")
+
+    return p
+
+
+class _HostOriginMiddleware(BaseHTTPMiddleware):
+    """Rejeita Host/peer fora do loopback e Origin cruzado em mutações."""
+
+    async def dispatch(self, request: Request, call_next):
+        host = request.headers.get("host", "")
+        if not _host_is_allowed(host):
+            return JSONResponse(
+                {"detail": "Host não permitido (use loopback ou MEET_ALLOW_REMOTE=1)"},
+                status_code=403,
+            )
+        # Host é spoofable; exige peer loopback quando remoto não está liberado.
+        if not _peer_is_loopback(request):
+            return JSONResponse(
+                {
+                    "detail": "Conexão não-loopback negada "
+                    "(use 127.0.0.1 ou MEET_ALLOW_REMOTE=1)"
+                },
+                status_code=403,
+            )
+        if request.method in _MUTATING:
+            origin = request.headers.get("origin")
+            if origin:
+                o_host = _origin_host(origin)
+                req_host = _normalize_host(host)
+                if o_host is None or (
+                    o_host != req_host
+                    and o_host not in _LOOPBACK_HOSTS
+                    and not (req_host in _LOOPBACK_HOSTS and o_host in _LOOPBACK_HOSTS)
+                ):
+                    return JSONResponse(
+                        {"detail": "Origin não permitido"},
+                        status_code=403,
+                    )
+        return await call_next(request)
+
+
+def _validate_speaker_name(name: str) -> str:
+    cleaned = name.strip()
+    if not cleaned:
+        raise HTTPException(400, "Nome vazio")
+    if any(c in cleaned for c in ("/", "\\", "\0")):
+        raise HTTPException(400, "Nome de falante não pode conter / ou \\")
+    if len(cleaned) > 120:
+        raise HTTPException(400, "Nome de falante muito longo")
+    return cleaned
 
 
 def _pending_labels(settings, meeting_id: int) -> list[str]:
@@ -138,8 +322,12 @@ def _serialize_job(job: Job) -> dict:
 
 
 def _highlight_snippet(raw: str) -> str:
-    """Converte marcadores FTS5 [word] para <mark>word</mark>."""
-    return re.sub(r"\[([^\]]*)\]", r"<mark>\1</mark>", raw)
+    """HTML-escape o snippet FTS e re-aplica <mark> só nos hits (marcadores […])."""
+    import html
+
+    # FTS5 snippet() usa '[', ']' em volta dos termos; escapar o resto evita XSS.
+    escaped = html.escape(raw, quote=True)
+    return re.sub(r"\[([^\]]*)\]", r"<mark>\1</mark>", escaped)
 
 
 # ── Pydantic request bodies ──────────────────────────────────────────────────
@@ -239,6 +427,16 @@ class AddActionItemBody(BaseModel):
     explicitness: Literal["explicit", "inferred"] = "inferred"
     review_status: Literal["confirmed", "needs_review"] = "needs_review"
 
+class PatchMeetingFactBody(BaseModel):
+    text: str | None = None
+    kind: Literal["decision", "requirement", "constraint", "open_question"] | None = None
+    source_start: float | None = None
+    source_end: float | None = None
+    evidence_quote: str | None = None
+    explicitness: Literal["explicit", "inferred"] | None = None
+    review_status: Literal["confirmed", "needs_review"] | None = None
+
+
 class PatchTurnBody(BaseModel):
     seg_ids: list[int]
     text: str | None = None
@@ -255,6 +453,7 @@ class ReprocessBody(BaseModel):
 
 
 class RenameSpeakerBody(BaseModel):
+    name: str
     new_name: str
 
 
@@ -279,19 +478,37 @@ class ContextExportBody(BaseModel):
     include_evidence: bool = True
     include_transcript: bool = False
 
-# Verifiers PKCE pendentes: {state → verifier}. Limpo após uso, max 5 entradas.
-_pending_verifiers: dict[str, str] = {}
+# Verifiers PKCE pendentes: {state → (verifier, created_monotonic)}. Limpo após uso.
+_pending_verifiers: dict[str, tuple[str, float]] = {}
+_pending_auth_lock = threading.Lock()
 _MAX_PENDING = 5
+_PENDING_TTL_S = 15 * 60
 _VALID_LLM_PROVIDERS = frozenset({"claude-code", "anthropic", "openai", "ollama"})
-# Device-code flows OpenAI pendentes: {state → {device_auth_id, user_code, interval}}
+# Device-code flows OpenAI: {state → {..., created: monotonic}}
 _pending_openai: dict[str, dict] = {}
 _MAX_PENDING_OPENAI = 5
+
+
+def _purge_expired_pending(now: float | None = None) -> None:
+    """Remove states OAuth expirados (caller deve segurar _pending_auth_lock)."""
+    t = time.monotonic() if now is None else now
+    dead_v = [k for k, (_, created) in _pending_verifiers.items() if t - created > _PENDING_TTL_S]
+    for k in dead_v:
+        del _pending_verifiers[k]
+    dead_o = [
+        k
+        for k, v in _pending_openai.items()
+        if t - float(v.get("created", 0)) > _PENDING_TTL_S
+    ]
+    for k in dead_o:
+        del _pending_openai[k]
 
 # ── App ──────────────────────────────────────────────────────────────────────
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="meet", docs_url=None, redoc_url=None)
+    app.add_middleware(_HostOriginMiddleware)
 
     # ── Meetings ──────────────────────────────────────────────────────────────
 
@@ -421,9 +638,9 @@ def create_app() -> FastAPI:
 
         web_h = min(720, source_h) if source_h else 720
         full_h = source_h or 1080
-        media_managed = bool(getattr(result, "media_managed", False))
-        source_origin = getattr(result, "source_origin", result.source) or result.source
-        md_path = getattr(result, "md_path", None)
+        media_managed = bool(result.media_managed)
+        source_origin = result.source_origin or result.source
+        md_path = result.md_path
         project = store.get_project(result.project_id) if result.project_id is not None else None
 
         return {
@@ -556,7 +773,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(404, "Reunião não encontrada")
         result = store.get_meeting(meeting_id)
         if result is not None:
-            md_path = getattr(result, "md_path", None)
+            md_path = result.md_path
             if md_path:
                 Path(md_path).write_text(render_mod.to_markdown(result), encoding="utf-8")
         return {"ok": True}
@@ -573,7 +790,7 @@ def create_app() -> FastAPI:
         result = store.get_meeting(meeting_id)
         if result is None:
             raise HTTPException(404, "Reunião não encontrada")
-        src = Path(body.path).expanduser()
+        src = _assert_user_media_path(body.path)
         if not src.is_file():
             raise HTTPException(400, f"Arquivo inválido: {body.path}")
         if body.import_media:
@@ -581,8 +798,8 @@ def create_app() -> FastAPI:
         else:
             store.set_media(
                 meeting_id,
-                source=src.resolve(),
-                source_origin=str(src.resolve()),
+                source=src,
+                source_origin=str(src),
                 media_managed=False,
             )
         return {"ok": True}
@@ -595,9 +812,9 @@ def create_app() -> FastAPI:
         from .. import voicebank as voicebank_mod
 
         settings, store = _settings_store()
-        name = body.name.strip()
-        if not name:
-            raise HTTPException(400, "Nome vazio")
+        if store.get_meeting(meeting_id) is None:
+            raise HTTPException(404, "Reunião não encontrada")
+        name = _validate_speaker_name(body.name)
 
         pending_path = settings.data_dir / "pending" / f"{meeting_id}.npz"
         if pending_path.exists():
@@ -608,7 +825,7 @@ def create_app() -> FastAPI:
         store.update_speaker(meeting_id, body.label, name)
         result = store.get_meeting(meeting_id)
         if result is not None:
-            md_path = getattr(result, "md_path", None)
+            md_path = result.md_path
             if md_path:
                 Path(md_path).write_text(render_mod.to_markdown(result), encoding="utf-8")
         return {"ok": True}
@@ -632,6 +849,14 @@ def create_app() -> FastAPI:
         fields = body.model_dump(exclude_unset=True)
         if not store.update_action_item(item_id, fields):
             raise HTTPException(404, "Action item não encontrado")
+        return {"ok": True}
+
+    @app.patch("/api/meeting-facts/{fact_id}")
+    def api_patch_meeting_fact(fact_id: int, body: PatchMeetingFactBody) -> dict:
+        _, store = _settings_store()
+        fields = body.model_dump(exclude_unset=True)
+        if not store.update_meeting_fact(fact_id, fields):
+            raise HTTPException(404, "Fato não encontrado")
         return {"ok": True}
 
     @app.post("/api/meetings/{meeting_id}/action-items")
@@ -732,7 +957,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/process")
     def api_process(body: ProcessBody) -> dict:
-        path = Path(body.video).expanduser()
+        path = _assert_user_media_path(body.video)
         if not path.is_file():
             raise HTTPException(400, f"Arquivo inválido: {body.video}")
         if body.project_id is not None:
@@ -742,7 +967,7 @@ def create_app() -> FastAPI:
         job = manager.submit(
             kind="process",
             label=path.name,
-            video=str(path.resolve()),
+            video=str(path),
             title=body.title.strip(),
             mic_track=body.mic_track,
             others_track=body.others_track,
@@ -837,6 +1062,20 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Job não encontrado")
         return _serialize_job(job)
 
+    @app.post("/api/jobs/{job_id}/retry")
+    def api_job_retry(job_id: str) -> dict:
+        """Reenvia job terminal (done/error) com os mesmos params."""
+        job = manager.retry(job_id)
+        if job is None:
+            existing = manager.get(job_id)
+            if existing is None:
+                raise HTTPException(404, "Job não encontrado")
+            raise HTTPException(
+                400,
+                "Só é possível repetir jobs concluídos ou com erro",
+            )
+        return _serialize_job(job)
+
     @app.get("/api/jobs/{job_id}/events")
     async def api_job_events(job_id: str) -> StreamingResponse:
         if manager.get(job_id) is None:
@@ -881,12 +1120,17 @@ def create_app() -> FastAPI:
 
     @app.get("/api/browse")
     def api_browse(path: str = "") -> dict:
-        browse_path = Path(path).expanduser() if path else Path.home()
+        settings = load_settings()
+        try:
+            browse_path = _assert_user_media_path(path or str(Path.home()), for_browse=True)
+        except HTTPException:
+            browse_path = Path.home().resolve()
         if not browse_path.exists():
-            browse_path = Path.home()
+            browse_path = Path.home().resolve()
         if browse_path.is_file():
             browse_path = browse_path.parent
 
+        sensitive = _sensitive_roots(settings)
         entries: list[dict] = []
         try:
             kids = sorted(
@@ -898,6 +1142,12 @@ def create_app() -> FastAPI:
         for p in kids:
             if p.name.startswith("."):
                 continue
+            try:
+                resolved = p.resolve()
+            except OSError:
+                continue
+            if any(resolved == root or _path_under(resolved, root) for root in sensitive):
+                continue
             if p.is_dir():
                 entries.append({"name": p.name, "path": str(p), "kind": "dir", "size": None})
             elif p.suffix.lower() in MEDIA_EXTS:
@@ -908,6 +1158,12 @@ def create_app() -> FastAPI:
                 entries.append({"name": p.name, "path": str(p), "kind": "file", "size": size})
 
         parent = str(browse_path.parent) if browse_path != browse_path.parent else None
+        # Parent só se ainda sob home e fora de sensitive
+        if parent:
+            try:
+                _assert_user_media_path(parent, for_browse=True)
+            except HTTPException:
+                parent = None
         quick = [str(d) for d in QUICK_DIRS if d.exists()]
 
         return {
@@ -926,12 +1182,7 @@ def create_app() -> FastAPI:
         """
         from ..audio import probe_audio_streams, probe_video_streams
 
-        p = Path(path).expanduser().resolve()
-        home = Path.home().resolve()
-        try:
-            p.relative_to(home)
-        except ValueError as exc:
-            raise HTTPException(403, "Acesso fora do home negado") from exc
+        p = _assert_user_media_path(path)
         if not p.is_file():
             raise HTTPException(404, "Arquivo não encontrado")
         try:
@@ -947,33 +1198,26 @@ def create_app() -> FastAPI:
     def api_speakers() -> list[dict]:
         _, store = _settings_store()
         voices = store.all_voices()
-        # meetings count: COUNT DISTINCT meeting_id per speaker
-        counts_rows = store._conn.execute(
-            "SELECT speaker, COUNT(DISTINCT meeting_id) AS cnt FROM segments"
-            " WHERE speaker IS NOT NULL GROUP BY speaker"
-        ).fetchall()
-        meetings_by_name = {r["speaker"]: r["cnt"] for r in counts_rows}
+        meetings_by_name = store.speaker_meeting_counts()
         return [
             {"name": n, "dims": len(blob) // 4, "meetings": meetings_by_name.get(n, 0)}
             for n, blob in sorted(voices.items())
         ]
 
-    @app.patch("/api/speakers/{name}")
-    def api_rename_speaker(name: str, body: RenameSpeakerBody) -> dict:
-        new_name = body.new_name.strip()
-        if not new_name:
-            raise HTTPException(400, "new_name não pode ser vazio")
+    @app.patch("/api/speakers")
+    def api_rename_speaker(body: RenameSpeakerBody) -> dict:
+        new_name = _validate_speaker_name(body.new_name)
         _, store = _settings_store()
-        store.rename_voice(name, new_name)
+        store.rename_voice(body.name, new_name)
         return {"ok": True}
 
-    @app.get("/api/speakers/{name}/usage")
-    def api_speaker_usage(name: str) -> list[dict]:
+    @app.get("/api/speakers/usage")
+    def api_speaker_usage(name: str = Query(...)) -> list[dict]:
         _, store = _settings_store()
         return store.voice_usage(name)
 
-    @app.delete("/api/speakers/{name}", status_code=204)
-    def api_delete_speaker(name: str) -> None:
+    @app.delete("/api/speakers", status_code=204)
+    def api_delete_speaker(name: str = Query(...)) -> None:
         _, store = _settings_store()
         store.delete_voice(name)
 
@@ -999,10 +1243,16 @@ def create_app() -> FastAPI:
         force: bool,
         quality: str = "web",
     ) -> FileResponse:
-        """Gera (se preciso) e serve preview de vídeo ou mix de áudio."""
+        """Serve preview/mix em cache; encode síncrono só com force=1.
+
+        Sem force, ausência de cache → 409 (use POST mix job). Evita travar a
+        API em ffmpeg multi-minuto no path GET.
+        """
         from ..audio import (
             PREVIEW_FULL,
             PREVIEW_WEB,
+            _cache_is_fresh,
+            _preview_is_browser_safe,
             ensure_listen_mix,
             ensure_listen_preview,
             listen_mix_path,
@@ -1015,6 +1265,13 @@ def create_app() -> FastAPI:
         listen_dir = settings.data_dir / "listen"
         listen_dir.mkdir(parents=True, exist_ok=True)
 
+        def _not_ready(what: str) -> None:
+            raise HTTPException(
+                409,
+                f"{what} ainda não gerado. Dispare o job de mix "
+                f"(POST /api/meetings/{meeting_id}/mix) ou use force=1.",
+            )
+
         if kind == "preview":
             has_video = probe_video_streams(source) >= 1
             if not has_video:
@@ -1024,6 +1281,19 @@ def create_app() -> FastAPI:
                 preferred = listen_preview_path(source, q)
                 suffix = "full.mp4" if q == PREVIEW_FULL else "mp4"
                 fallback = listen_dir / f"{meeting_id}.listen.{suffix}"
+                if not force:
+                    for candidate in (preferred, fallback):
+                        if _cache_is_fresh(candidate, source) and _preview_is_browser_safe(
+                            candidate, q
+                        ):
+                            return FileResponse(
+                                candidate,
+                                media_type="video/mp4",
+                                filename=candidate.name,
+                                content_disposition_type="inline",
+                                headers={"Cache-Control": "private, max-age=3600"},
+                            )
+                    _not_ready("Preview")
                 try:
                     path = ensure_listen_preview(
                         source, force=force, output_path=preferred, quality=q
@@ -1047,6 +1317,17 @@ def create_app() -> FastAPI:
 
         preferred = listen_mix_path(source)
         fallback = listen_dir / f"{meeting_id}.listen.m4a"
+        if not force:
+            for candidate in (preferred, fallback):
+                if _cache_is_fresh(candidate, source):
+                    return FileResponse(
+                        candidate,
+                        media_type="audio/mp4",
+                        filename=candidate.name,
+                        content_disposition_type="inline",
+                        headers={"Cache-Control": "private, max-age=3600"},
+                    )
+            _not_ready("Mix de áudio")
         try:
             path = ensure_listen_mix(source, force=force, output_path=preferred)
         except Exception:
@@ -1069,32 +1350,67 @@ def create_app() -> FastAPI:
         q: Annotated[str, Query()] = "full",
         v: Annotated[str | None, Query()] = None,  # cache-bust opcional
     ) -> FileResponse:
-        """Vídeo + mic/desktop misturados (mp4)."""
+        """Vídeo + mic/desktop misturados (mp4).
+
+        GET nunca re-encoda à força (evita CSRF/DoS via force=true cross-origin).
+        Gera só se o cache ainda não existir. Force: POST .../rebuild.
+        """
         del v
+        if force:
+            raise HTTPException(
+                405,
+                "force=true não permitido em GET; use POST "
+                f"/meetings/{meeting_id}/preview/rebuild",
+            )
         from ..audio import _normalize_quality
 
         quality = _normalize_quality(q)
-        return _serve_listen_file(meeting_id, kind="preview", force=force, quality=quality)
+        return _serve_listen_file(
+            meeting_id, kind="preview", force=False, quality=quality
+        )
+
+    @app.post("/meetings/{meeting_id}/preview/rebuild")
+    def meeting_preview_rebuild(
+        meeting_id: int,
+        q: Annotated[str, Query()] = "full",
+    ) -> FileResponse:
+        """Re-gera preview (ffmpeg) — método mutável, coberto pelo Origin check."""
+        from ..audio import _normalize_quality
+
+        quality = _normalize_quality(q)
+        return _serve_listen_file(
+            meeting_id, kind="preview", force=True, quality=quality
+        )
 
     @app.get("/meetings/{meeting_id}/audio")
     def meeting_audio(
         meeting_id: int,
         force: Annotated[bool, Query()] = False,
     ) -> FileResponse:
-        """Só o mix de áudio mic+desktop (.listen.m4a)."""
-        return _serve_listen_file(meeting_id, kind="audio", force=force)
+        """Só o mix de áudio mic+desktop (.listen.m4a). GET sem force."""
+        if force:
+            raise HTTPException(
+                405,
+                "force=true não permitido em GET; use POST "
+                f"/meetings/{meeting_id}/audio/rebuild",
+            )
+        return _serve_listen_file(meeting_id, kind="audio", force=False)
+
+    @app.post("/meetings/{meeting_id}/audio/rebuild")
+    def meeting_audio_rebuild(meeting_id: int) -> FileResponse:
+        """Re-gera mix de áudio (ffmpeg) — mutável, Origin-guarded."""
+        return _serve_listen_file(meeting_id, kind="audio", force=True)
 
     @app.get("/files")
     def serve_local_file(path: Annotated[str, Query()]) -> FileResponse:
-        """Serve arquivo local (só sob home do usuário) — play / download."""
-        p = Path(path).expanduser().resolve()
-        home = Path.home().resolve()
-        try:
-            p.relative_to(home)
-        except ValueError as exc:
-            raise HTTPException(403, "Acesso fora do home negado") from exc
+        """Serve mídia local (extensões MEDIA_EXTS; sob home; nunca data_dir/config)."""
+        p = _assert_user_media_path(path)
         if not p.is_file():
             raise HTTPException(404, "Arquivo não encontrado")
+        if p.suffix.lower() not in MEDIA_EXTS:
+            raise HTTPException(
+                403, f"Tipo de arquivo não permitido (aceitos: {', '.join(sorted(MEDIA_EXTS))})"
+            )
         media = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
         return FileResponse(p, media_type=media, filename=p.name)
 
@@ -1295,11 +1611,12 @@ def create_app() -> FastAPI:
 
         state = _os.urandom(16).hex()
         verifier, challenge = generate_pkce()
-        # Manter no máx _MAX_PENDING entradas; descartar a mais antiga.
-        if len(_pending_verifiers) >= _MAX_PENDING:
-            oldest = next(iter(_pending_verifiers))
-            del _pending_verifiers[oldest]
-        _pending_verifiers[state] = verifier
+        with _pending_auth_lock:
+            _purge_expired_pending()
+            if len(_pending_verifiers) >= _MAX_PENDING:
+                oldest = next(iter(_pending_verifiers))
+                del _pending_verifiers[oldest]
+            _pending_verifiers[state] = (verifier, time.monotonic())
         url = build_authorize_url(state, challenge)
         return {"url": url, "state": state}
 
@@ -1311,9 +1628,12 @@ def create_app() -> FastAPI:
         # code pode conter state como fragmento (#)
         if "#" in code:
             code, state = code.split("#", 1)
-        verifier = _pending_verifiers.pop(state, None)
-        if verifier is None:
+        with _pending_auth_lock:
+            _purge_expired_pending()
+            entry = _pending_verifiers.pop(state, None)
+        if entry is None:
             raise HTTPException(400, "State inválido ou expirado")
+        verifier, _created = entry
         try:
             d = exchange_code(code, state, verifier)
         except Exception as exc:
@@ -1351,14 +1671,17 @@ def create_app() -> FastAPI:
             raise HTTPException(503, f"Falha ao iniciar autenticação OpenAI: {exc}") from exc
 
         state = _os.urandom(16).hex()
-        if len(_pending_openai) >= _MAX_PENDING_OPENAI:
-            oldest = next(iter(_pending_openai))
-            del _pending_openai[oldest]
-        _pending_openai[state] = {
-            "device_auth_id": data["device_auth_id"],
-            "user_code": data["user_code"],
-            "interval": data.get("interval", 5),
-        }
+        with _pending_auth_lock:
+            _purge_expired_pending()
+            if len(_pending_openai) >= _MAX_PENDING_OPENAI:
+                oldest = next(iter(_pending_openai))
+                del _pending_openai[oldest]
+            _pending_openai[state] = {
+                "device_auth_id": data["device_auth_id"],
+                "user_code": data["user_code"],
+                "interval": data.get("interval", 5),
+                "created": time.monotonic(),
+            }
         url = data.get("verification_uri_complete") or _oai._DEVICE_PAGE
         return {"url": url, "state": state, "user_code": data["user_code"]}
 
@@ -1366,7 +1689,9 @@ def create_app() -> FastAPI:
     def api_openai_exchange(body: OpenAIExchangeBody) -> dict:
         """Faz polling e troca de tokens OpenAI por state; persiste e ativa provider."""
         state = body.state.strip()
-        pending = _pending_openai.pop(state, None)
+        with _pending_auth_lock:
+            _purge_expired_pending()
+            pending = _pending_openai.pop(state, None)
         if pending is None:
             raise HTTPException(400, "State inválido ou expirado")
         try:
@@ -1382,13 +1707,15 @@ def create_app() -> FastAPI:
             )
             tokens = _oai.build_stored_tokens(token_data)
         except TimeoutError as exc:
-            _pending_openai[state] = pending
+            with _pending_auth_lock:
+                _pending_openai[state] = pending
             raise HTTPException(
                 408,
                 "Autorização ainda pendente. Autorize na OpenAI e tente concluir novamente.",
             ) from exc
         except Exception as exc:
-            _pending_openai[state] = pending
+            with _pending_auth_lock:
+                _pending_openai[state] = pending
             raise HTTPException(400, f"Autenticação OpenAI falhou: {exc}") from exc
         settings = load_settings()
         _oai.save_tokens(settings, tokens)
