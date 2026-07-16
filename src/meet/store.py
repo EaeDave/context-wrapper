@@ -5,11 +5,106 @@ from __future__ import annotations
 from collections.abc import Callable
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
+from typing import Any, TypeVar, cast
 
 from .models import ActionItem, MeetingFact, MeetingResult, TranscriptCorrection, TranscriptSegment, VisualEvidence
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _with_db_lock(method: _F) -> _F:
+    """Serializa métodos públicos do Store (sqlite3 + check_same_thread=False)."""
+
+    @wraps(method)
+    def wrapper(self: "Store", *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return cast(_F, wrapper)
+
+
+def _loads_json(raw: Any, default: Any) -> Any:
+    """json.loads tolerante — célula corrompida não derruba get/list."""
+    if raw is None or raw == "":
+        return default
+    if not isinstance(raw, str):
+        return default
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return default
+
+
+def _norm_what(what: str | None) -> str:
+    return " ".join((what or "").casefold().split())
+
+
+def _action_item_match_key(
+    what: str | None,
+    source_start: float | None,
+    source_end: float | None,
+) -> tuple:
+    """Chave estável p/ casar action items entre reextrações."""
+    return (_norm_what(what), source_start, source_end)
+
+
+def _ranges_overlap(
+    a0: float | None,
+    a1: float | None,
+    b0: float | None,
+    b1: float | None,
+    *,
+    slack: float = 2.0,
+) -> bool:
+    """True se intervalos se sobrepõem (com folga em segundos) ou um lado é nulo."""
+    if a0 is None or a1 is None or b0 is None or b1 is None:
+        return False
+    return not (a1 + slack < b0 or b1 + slack < a0)
+
+
+def _find_prev_action_item(
+    prev_rows: list,
+    item: ActionItem,
+    used: set[int],
+) -> Any | None:
+    """Casa item novo com um row antigo ainda não consumido.
+
+    Ordem: (what+range exato) → (what único) → (what + ranges sobrepostos).
+    """
+    key = _action_item_match_key(item.what, item.source_start, item.source_end)
+    norm = key[0]
+    # 1) chave exata
+    for i, r in enumerate(prev_rows):
+        if i in used:
+            continue
+        if _action_item_match_key(r["what"], r["source_start"], r["source_end"]) == key:
+            used.add(i)
+            return r
+    if not norm:
+        return None
+    # 2) mesmo what (normalizado), se único entre restantes
+    what_hits = [
+        i
+        for i, r in enumerate(prev_rows)
+        if i not in used and _norm_what(r["what"]) == norm
+    ]
+    if len(what_hits) == 1:
+        used.add(what_hits[0])
+        return prev_rows[what_hits[0]]
+    # 3) what igual + ranges sobrepostos (timestamps LLM flutuam)
+    for i in what_hits:
+        r = prev_rows[i]
+        if _ranges_overlap(
+            item.source_start, item.source_end, r["source_start"], r["source_end"]
+        ):
+            used.add(i)
+            return r
+    return None
 
 
 _SCHEMA = """\
@@ -200,8 +295,12 @@ class Store:
 
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.db_path = Path(db_path)
+        self._lock = threading.RLock()
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout = 5000")
+        self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(_SCHEMA)
         self._migrate()
 
@@ -262,6 +361,18 @@ class Store:
                 "CREATE INDEX IF NOT EXISTS idx_visual_evidence_meeting_time"
                 " ON visual_evidence(meeting_id, timestamp)"
             )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_segments_meeting_id"
+                " ON segments(meeting_id)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_action_items_meeting_id"
+                " ON action_items(meeting_id)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_segments_speaker"
+                " ON segments(speaker)"
+            )
 
     # ------------------------------------------------------------------
     # Reuniões
@@ -300,66 +411,13 @@ class Store:
                     pid,
                 ),
             )
-            meeting_id: int = cur.lastrowid  # type: ignore[assignment]
+            meeting_id = int(cur.lastrowid or 0)
+            if meeting_id <= 0:
+                raise RuntimeError("INSERT meetings não retornou id")
 
-            for item in result.action_items:
-                self._conn.execute(
-                    "INSERT INTO action_items"
-                    " (meeting_id, what, where_, details, requested_by, priority, status, due,"
-                    "  assigned_to, source_start, source_end, evidence_quote, explicitness, review_status)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        meeting_id,
-                        item.what,
-                        item.where,
-                        item.details,
-                        item.requested_by,
-                        item.priority,
-                        item.status,
-                        item.due,
-                        json.dumps(item.assigned_to) if item.assigned_to is not None else None,
-                        item.source_start,
-                        item.source_end,
-                        item.evidence_quote,
-                        item.explicitness,
-                        item.review_status,
-                    ),
-                )
-
-            for fact in result.facts:
-                self._conn.execute(
-                    "INSERT INTO meeting_facts"
-                    " (meeting_id, kind, text, source_start, source_end,"
-                    "  evidence_quote, explicitness, review_status)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        meeting_id,
-                        fact.kind,
-                        fact.text,
-                        fact.source_start,
-                        fact.source_end,
-                        fact.evidence_quote,
-                        fact.explicitness,
-                        fact.review_status,
-                    ),
-                )
-
-            for seg in result.segments:
-                self._conn.execute(
-                    "INSERT INTO segments"
-                    " (meeting_id, start, end, speaker, text, original_text, corrections)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        meeting_id,
-                        seg.start,
-                        seg.end,
-                        seg.speaker,
-                        seg.text,
-                        seg.original_text,
-                        _dump_corrections(seg.corrections),
-                    ),
-                )
-
+            self._insert_action_items(meeting_id, result.action_items)
+            self._insert_facts(meeting_id, result.facts)
+            self._insert_segments(meeting_id, result.segments)
             self._index_meeting(meeting_id, result.segments, result.action_items, result.facts)
 
         return meeting_id
@@ -456,7 +514,7 @@ class Store:
                 id=r["id"],
                 status=r["status"],
                 due=r["due"],
-                assigned_to=json.loads(r["assigned_to"]) if r["assigned_to"] else None,
+                assigned_to=_loads_json(r["assigned_to"], None),
                 source_start=r["source_start"],
                 source_end=r["source_end"],
                 evidence_quote=r["evidence_quote"],
@@ -523,8 +581,11 @@ class Store:
             fact.visual_evidence = linked(fact.source_start, fact.source_end)
 
         participants = sorted({s.speaker for s in segments if s.speaker})
+        matches = _loads_json(row["speaker_matches"] or "{}", {})
+        if not isinstance(matches, dict):
+            matches = {}
 
-        result = MeetingResult(
+        return MeetingResult(
             source=row["source"],
             date=row["date"],
             title=row["title"],
@@ -535,17 +596,16 @@ class Store:
             facts=facts,
             segments=segments,
             visual_evidence=visual_evidence,
-            speaker_matches=json.loads(row["speaker_matches"] or "{}"),
+            speaker_matches=matches,
             project_id=row["project_id"],
+            meeting_id=meeting_id,
+            md_path=Path(row["md_path"]) if row["md_path"] else None,
+            source_origin=row["source_origin"] or row["source"] or "",
+            media_managed=bool(row["media_managed"]),
+            media_ok=Path(row["source"]).expanduser().is_file(),
+            created_at=row["created_at"] or "",
+            updated_at=row["updated_at"] or "",
         )
-        result.md_path = Path(row["md_path"]) if row["md_path"] else None  # type: ignore[attr-defined]
-        result.meeting_id = meeting_id  # type: ignore[attr-defined]
-        result.source_origin = row["source_origin"] or row["source"]  # type: ignore[attr-defined]
-        result.media_managed = bool(row["media_managed"])  # type: ignore[attr-defined]
-        result.media_ok = Path(row["source"]).expanduser().is_file()  # type: ignore[attr-defined]
-        result.created_at = row["created_at"] or ""  # type: ignore[attr-defined]
-        result.updated_at = row["updated_at"] or ""  # type: ignore[attr-defined]
-        return result
 
     def list_meetings(self) -> list[tuple[int, str, str]]:
         """(id, date, title) — compat CLI / testes."""
@@ -632,7 +692,11 @@ class Store:
             + " ORDER  BY rank"
             " LIMIT  ?"
         )
-        rows = self._conn.execute(sql, [query, *extra_params, limit]).fetchall()
+        try:
+            rows = self._conn.execute(sql, [query, *extra_params, limit]).fetchall()
+        except sqlite3.OperationalError:
+            # Sintaxe FTS5 inválida (aspas desbalanceadas, operadores soltos, etc.)
+            return []
         return [dict(r) for r in rows]
 
     def update_title(self, meeting_id: int, title: str) -> bool:
@@ -777,7 +841,7 @@ class Store:
 
     def _revalidate_traceability(self, meeting_id: int) -> None:
         """Recalcula review_status de tarefas e fatos contra transcript persistido."""
-        from .extract import _validate_evidence
+        from .traceability import validate_evidence
 
         segments = [
             TranscriptSegment(
@@ -799,7 +863,7 @@ class Store:
                 (meeting_id,),
             ).fetchall()
             for row in rows:
-                confirmed = _validate_evidence(
+                confirmed = validate_evidence(
                     segments,
                     row["source_start"],
                     row["source_end"],
@@ -829,13 +893,21 @@ class Store:
         meeting_id: int = row["meeting_id"]
         set_clause = ", ".join(f"{k} = ?" for k in safe)
         vals = list(safe.values()) + [item_id]
+        # Revalidar review_status só se evidência/transcript-relacionado mudou —
+        # patch de status/due/priority sozinho não deve sobrescrever confirmações.
+        _EVIDENCE_KEYS = frozenset({
+            "what", "where_", "details", "evidence_quote",
+            "source_start", "source_end", "explicitness",
+        })
+        needs_revalidate = bool(_EVIDENCE_KEYS & safe.keys())
         with self._conn:
             cur = self._conn.execute(
                 f"UPDATE action_items SET {set_clause} WHERE id = ?", vals
             )
             if cur.rowcount == 0:
                 return False
-            self._revalidate_traceability(meeting_id)
+            if needs_revalidate:
+                self._revalidate_traceability(meeting_id)
             self._conn.execute(
                 "DELETE FROM search_index WHERE meeting_id = ?", (meeting_id,)
             )
@@ -871,7 +943,9 @@ class Store:
                     item.review_status,
                 ),
             )
-            new_id: int = cur.lastrowid  # type: ignore[assignment]
+            new_id = int(cur.lastrowid or 0)
+            if new_id <= 0:
+                raise RuntimeError("INSERT action_items não retornou id")
             self._revalidate_traceability(meeting_id)
             self._conn.execute(
                 "DELETE FROM search_index WHERE meeting_id = ?", (meeting_id,)
@@ -978,7 +1052,7 @@ class Store:
                 "due": r["due"],
                 "project_id": r["project_id"],
                 "project_name": r["project_name"],
-                "assigned_to": json.loads(r["assigned_to"]) if r["assigned_to"] else None,
+                "assigned_to": _loads_json(r["assigned_to"], None),
                 "source_start": r["source_start"],
                 "source_end": r["source_end"],
                 "evidence_quote": r["evidence_quote"],
@@ -1071,9 +1145,58 @@ class Store:
     # Reprocess / reextract
     # ------------------------------------------------------------------
 
+    def _merge_action_items_preserving_state(
+        self,
+        meeting_id: int,
+        new_items: list[ActionItem],
+    ) -> list[ActionItem]:
+        """Casa itens novos com os existentes e preserva status/due/assigned_to humanos."""
+        prev_rows = list(
+            self._conn.execute(
+                "SELECT what, source_start, source_end, status, due, assigned_to"
+                " FROM action_items WHERE meeting_id = ?",
+                (meeting_id,),
+            ).fetchall()
+        )
+        used: set[int] = set()
+        merged: list[ActionItem] = []
+        for item in new_items:
+            old = _find_prev_action_item(prev_rows, item, used)
+            if old is None:
+                merged.append(item)
+                continue
+            merged.append(
+                ActionItem(
+                    what=item.what,
+                    where=item.where,
+                    details=item.details,
+                    requested_by=item.requested_by,
+                    priority=item.priority,
+                    status=old["status"] or item.status,
+                    due=old["due"] if old["due"] is not None else item.due,
+                    assigned_to=(
+                        item.assigned_to
+                        if item.assigned_to is not None
+                        else _loads_json(old["assigned_to"], None)
+                    ),
+                    source_start=item.source_start,
+                    source_end=item.source_end,
+                    evidence_quote=item.evidence_quote,
+                    explicitness=item.explicitness,
+                    review_status=item.review_status,
+                )
+            )
+        return merged
+
     def replace_meeting_content(self, meeting_id: int, result: "MeetingResult") -> None:
         """Substitui segments, action_items e facts in-place; preserva source/date/media. Atômico."""
         with self._conn:
+            exists = self._conn.execute(
+                "SELECT 1 FROM meetings WHERE id = ?", (meeting_id,)
+            ).fetchone()
+            if exists is None:
+                raise ValueError(f"Reunião {meeting_id} não encontrada")
+            items = self._merge_action_items_preserving_state(meeting_id, result.action_items)
             self._conn.execute(
                 "UPDATE meetings SET title=?, summary=?, duration=?, updated_at=?, speaker_matches=?"
                 " WHERE id=?",
@@ -1089,60 +1212,37 @@ class Store:
             self._conn.execute(
                 "DELETE FROM meeting_facts WHERE meeting_id=?", (meeting_id,)
             )
-            for item in result.action_items:
-                self._conn.execute(
-                    "INSERT INTO action_items"
-                    " (meeting_id, what, where_, details, requested_by, priority, status, due,"
-                    "  assigned_to, source_start, source_end, evidence_quote, explicitness, review_status)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        meeting_id, item.what, item.where, item.details,
-                        item.requested_by, item.priority, item.status, item.due,
-                        json.dumps(item.assigned_to) if item.assigned_to is not None else None,
-                        item.source_start, item.source_end, item.evidence_quote,
-                        item.explicitness, item.review_status,
-                    ),
-                )
-            for fact in result.facts:
-                self._conn.execute(
-                    "INSERT INTO meeting_facts"
-                    " (meeting_id, kind, text, source_start, source_end,"
-                    "  evidence_quote, explicitness, review_status)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (meeting_id, fact.kind, fact.text, fact.source_start,
-                     fact.source_end, fact.evidence_quote, fact.explicitness,
-                     fact.review_status),
-                )
-            for seg in result.segments:
-                self._conn.execute(
-                    "INSERT INTO segments"
-                    " (meeting_id, start, end, speaker, text, original_text, corrections)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        meeting_id,
-                        seg.start,
-                        seg.end,
-                        seg.speaker,
-                        seg.text,
-                        seg.original_text,
-                        _dump_corrections(seg.corrections),
-                    ),
-                )
+            self._insert_action_items(meeting_id, items)
+            self._insert_facts(meeting_id, result.facts)
+            self._insert_segments(meeting_id, result.segments)
             self._conn.execute(
                 "DELETE FROM search_index WHERE meeting_id=?", (meeting_id,)
             )
-            self._index_meeting(meeting_id, result.segments, result.action_items, result.facts)
+            self._index_meeting(meeting_id, result.segments, items, result.facts)
 
     def update_meeting_extract(
         self,
         meeting_id: int,
         summary: str,
         action_items: list[ActionItem],
-        title: str | None,
+        title: str | None = None,
         facts: list[MeetingFact] | None = None,
     ) -> None:
-        """Atualiza summary, action_items e facts; NÃO sobrescreve title existente. Atômico."""
+        """Atualiza summary, action_items e facts; preserva status/due de itens casados.
+
+        ``title`` é ignorado (assinatura legada / callers passam None).
+        """
+        del title  # API legada: title da reunião não é sobrescrito na reextração
         with self._conn:
+            # Meeting precisa existir (FK + job paralelo de delete)
+            exists = self._conn.execute(
+                "SELECT 1 FROM meetings WHERE id = ?", (meeting_id,)
+            ).fetchone()
+            if exists is None:
+                raise ValueError(f"Reunião {meeting_id} não encontrada")
+
+            merged = self._merge_action_items_preserving_state(meeting_id, action_items)
+
             self._conn.execute(
                 "UPDATE meetings SET summary=?, updated_at=? WHERE id=?",
                 (summary, _now(), meeting_id),
@@ -1153,31 +1253,8 @@ class Store:
             self._conn.execute(
                 "DELETE FROM meeting_facts WHERE meeting_id=?", (meeting_id,)
             )
-            for item in action_items:
-                self._conn.execute(
-                    "INSERT INTO action_items"
-                    " (meeting_id, what, where_, details, requested_by, priority, status, due,"
-                    "  assigned_to, source_start, source_end, evidence_quote, explicitness, review_status)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        meeting_id, item.what, item.where, item.details,
-                        item.requested_by, item.priority, item.status, item.due,
-                        json.dumps(item.assigned_to) if item.assigned_to is not None else None,
-                        item.source_start, item.source_end, item.evidence_quote,
-                        item.explicitness, item.review_status,
-                    ),
-                )
-            for fact in (facts or []):
-                self._conn.execute(
-                    "INSERT INTO meeting_facts"
-                    " (meeting_id, kind, text, source_start, source_end,"
-                    "  evidence_quote, explicitness, review_status)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (meeting_id, fact.kind, fact.text, fact.source_start,
-                     fact.source_end, fact.evidence_quote, fact.explicitness,
-                     fact.review_status),
-                )
-            # Reindex FTS: limpa e reinsere com segments do banco + novos action_items
+            self._insert_action_items(meeting_id, merged)
+            self._insert_facts(meeting_id, facts or [])
             self._conn.execute(
                 "DELETE FROM search_index WHERE meeting_id=?", (meeting_id,)
             )
@@ -1185,7 +1262,7 @@ class Store:
 
 
     def update_speaker(self, meeting_id: int, old: str, new: str) -> None:
-        """Renomeia falante em segments e reindexa FTS da reunião."""
+        """Renomeia falante em segments e reindexa FTS completo (segs+items+facts)."""
         with self._conn:
             self._conn.execute(
                 "UPDATE segments SET speaker = ? WHERE meeting_id = ? AND speaker = ?",
@@ -1195,33 +1272,7 @@ class Store:
                 "DELETE FROM search_index WHERE meeting_id = ?",
                 (meeting_id,),
             )
-            segs = [
-                TranscriptSegment(
-                    start=r["start"],
-                    end=r["end"],
-                    text=r["text"],
-                    speaker=r["speaker"],
-                )
-                for r in self._conn.execute(
-                    "SELECT start, end, speaker, text FROM segments WHERE meeting_id = ?",
-                    (meeting_id,),
-                )
-            ]
-            items = [
-                ActionItem(
-                    what=r["what"],
-                    where=r["where_"],
-                    details=r["details"],
-                    requested_by=r["requested_by"],
-                    priority=r["priority"],
-                )
-                for r in self._conn.execute(
-                    "SELECT what, where_, details, requested_by, priority"
-                    " FROM action_items WHERE meeting_id = ?",
-                    (meeting_id,),
-                )
-            ]
-            self._index_meeting(meeting_id, segs, items)
+            self._reindex_meeting_fts(meeting_id)
             self._conn.execute(
                 "UPDATE meetings SET updated_at = ? WHERE id = ?",
                 (_now(), meeting_id),
@@ -1242,6 +1293,46 @@ class Store:
         """Retorna todos os embeddings como dict nome → bytes."""
         rows = self._conn.execute("SELECT name, embedding FROM voices").fetchall()
         return {r["name"]: bytes(r["embedding"]) for r in rows}
+
+    def speaker_meeting_counts(self) -> dict[str, int]:
+        """Contagem de reuniões distintas por label de speaker nos segments."""
+        rows = self._conn.execute(
+            "SELECT speaker, COUNT(DISTINCT meeting_id) AS cnt FROM segments"
+            " WHERE speaker IS NOT NULL GROUP BY speaker"
+        ).fetchall()
+        return {r["speaker"]: int(r["cnt"]) for r in rows}
+
+    def update_meeting_fact(self, fact_id: int, fields: dict) -> bool:
+        """Atualiza campos de um fato; reindexa FTS e regenera .md."""
+        allowed = frozenset({
+            "text", "kind", "source_start", "source_end", "evidence_quote",
+            "explicitness", "review_status",
+        })
+        safe = {k: v for k, v in fields.items() if k in allowed}
+        if not safe:
+            return False
+        row = self._conn.execute(
+            "SELECT meeting_id FROM meeting_facts WHERE id = ?", (fact_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        meeting_id = int(row["meeting_id"])
+        sets = ", ".join(f"{k} = ?" for k in safe)
+        with self._conn:
+            self._conn.execute(
+                f"UPDATE meeting_facts SET {sets} WHERE id = ?",
+                [*safe.values(), fact_id],
+            )
+            self._conn.execute(
+                "DELETE FROM search_index WHERE meeting_id = ?", (meeting_id,)
+            )
+            self._reindex_meeting_fts(meeting_id)
+            self._conn.execute(
+                "UPDATE meetings SET updated_at = ? WHERE id = ?",
+                (_now(), meeting_id),
+            )
+        self._regen_md(meeting_id)
+        return True
 
     def upsert_voice(self, name: str, blob: bytes) -> None:
         """Insere ou substitui embedding de voz."""
@@ -1407,7 +1498,7 @@ class Store:
                     " VALUES (?, ?, ?, ?, ?)",
                     (name, description.strip(), repo_path.strip(), now, now),
                 )
-                return cur.lastrowid  # type: ignore[return-value]
+                return int(cur.lastrowid or 0)
         except sqlite3.IntegrityError as exc:
             if "UNIQUE" in str(exc).upper():
                 raise ValueError(f"Projeto '{name}' já existe") from exc
@@ -1622,6 +1713,68 @@ class Store:
     # Internos
     # ------------------------------------------------------------------
 
+    def _insert_action_items(self, meeting_id: int, items: list[ActionItem]) -> None:
+        """INSERT em lote de action items (caller já está em transação)."""
+        for item in items:
+            self._conn.execute(
+                "INSERT INTO action_items"
+                " (meeting_id, what, where_, details, requested_by, priority, status, due,"
+                "  assigned_to, source_start, source_end, evidence_quote, explicitness, review_status)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    meeting_id,
+                    item.what,
+                    item.where,
+                    item.details,
+                    item.requested_by,
+                    item.priority,
+                    item.status,
+                    item.due,
+                    json.dumps(item.assigned_to) if item.assigned_to is not None else None,
+                    item.source_start,
+                    item.source_end,
+                    item.evidence_quote,
+                    item.explicitness,
+                    item.review_status,
+                ),
+            )
+
+    def _insert_facts(self, meeting_id: int, facts: list[MeetingFact]) -> None:
+        for fact in facts:
+            self._conn.execute(
+                "INSERT INTO meeting_facts"
+                " (meeting_id, kind, text, source_start, source_end,"
+                "  evidence_quote, explicitness, review_status)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    meeting_id,
+                    fact.kind,
+                    fact.text,
+                    fact.source_start,
+                    fact.source_end,
+                    fact.evidence_quote,
+                    fact.explicitness,
+                    fact.review_status,
+                ),
+            )
+
+    def _insert_segments(self, meeting_id: int, segments: list[TranscriptSegment]) -> None:
+        for seg in segments:
+            self._conn.execute(
+                "INSERT INTO segments"
+                " (meeting_id, start, end, speaker, text, original_text, corrections)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    meeting_id,
+                    seg.start,
+                    seg.end,
+                    seg.speaker,
+                    seg.text,
+                    seg.original_text,
+                    _dump_corrections(seg.corrections),
+                ),
+            )
+
     def _index_meeting(
         self,
         meeting_id: int,
@@ -1693,7 +1846,23 @@ class Store:
         result = self.get_meeting(meeting_id)
         if result is None:
             return
-        md_path = getattr(result, "md_path", None)
+        md_path = result.md_path
         if not md_path:
             return
         Path(md_path).write_text(render_mod.to_markdown(result), encoding="utf-8")
+
+    def get_meeting_md_path(self, meeting_id: int) -> str | None:
+        """Path do markdown da reunião, ou None se a reunião não existir."""
+        row = self._conn.execute(
+            "SELECT md_path FROM meetings WHERE id = ?", (meeting_id,)
+        ).fetchone()
+        if row is None or not row["md_path"]:
+            return None
+        return str(row["md_path"])
+
+
+# Serializa métodos públicos (RLock reentrante — privados chamados sob o mesmo lock).
+for _name, _attr in list(vars(Store).items()):
+    if _name.startswith("_") or not callable(_attr):
+        continue
+    setattr(Store, _name, _with_db_lock(_attr))

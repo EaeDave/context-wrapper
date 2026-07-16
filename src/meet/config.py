@@ -135,7 +135,8 @@ def load_settings(config_path: Path = CONFIG_PATH) -> Settings:
         if key in values:
             values[key] = Path(str(values[key])).expanduser()
 
-    settings = Settings(**values)  # type: ignore[arg-type]
+    # values é dict heterogêneo (toml/env); campos validados em runtime pelo dataclass.
+    settings = Settings(**{f.name: values[f.name] for f in fields(Settings) if f.name in values})
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.output_dir.mkdir(parents=True, exist_ok=True)
     return settings

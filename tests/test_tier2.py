@@ -11,10 +11,10 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from meet.config import _LOCAL_KEYS, load_settings, save_local_settings
+from meet.config import _LOCAL_KEYS, load_settings
 from meet.models import MeetingResult, TranscriptSegment
 from meet.store import Store
-from meet.voicebank import enroll, resolve, resolve_with_scores
+from meet.voicebank import resolve, resolve_with_scores
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +446,7 @@ def test_rename_voice_fts_reindexed(tmp_path: Path) -> None:
     mid = _save_minimal(store)
 
     # Inserir segmento e indexar manualmente
-    seg = TranscriptSegment(start=0.0, end=1.0, text="olá mundo", speaker="Jonathas")
+    TranscriptSegment(start=0.0, end=1.0, text="olá mundo", speaker="Jonathas")
     with store._conn:
         store._conn.execute(
             "INSERT INTO segments (meeting_id, start, end, speaker, text)"
@@ -519,7 +519,7 @@ def test_local_keys_includes_tuning_keys() -> None:
 
 def test_save_local_settings_tuning_roundtrip(tmp_path: Path) -> None:
     """save_local_settings aceita tuning keys; load_settings aplica layering."""
-    settings = load_settings.__wrapped__ if hasattr(load_settings, "__wrapped__") else None  # type: ignore[attr-defined]
+    load_settings.__wrapped__ if hasattr(load_settings, "__wrapped__") else None  # type: ignore[attr-defined]
 
     # Simular settings apontando para tmp_path
     from meet.config import Settings, save_local_settings as _save
@@ -544,7 +544,7 @@ def test_save_local_settings_tuning_roundtrip(tmp_path: Path) -> None:
 
 def test_local_settings_similarity_threshold_float_loaded(tmp_path: Path) -> None:
     """similarity_threshold persisto como float é carregado corretamente."""
-    from meet.config import Settings, save_local_settings as _save, load_settings as _load
+    from meet.config import Settings, save_local_settings as _save
 
     s = Settings()
     s.data_dir = tmp_path  # type: ignore[assignment]

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from .models import FACT_KIND_LABELS, FACT_KINDS
