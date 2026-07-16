@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 from collections.abc import Callable
 import json
 import subprocess
@@ -17,6 +18,32 @@ _WAV_OPTS = ["-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le"]
 # remoto quieto) escapam do VAD do whisper; speechnorm levanta até 12.5x.
 _SPEECHNORM = "speechnorm=e=12.5:r=0.0001:l=1"
 
+# Timeouts: file corrompido não pode travar a fila FIFO de jobs.
+_FFPROBE_TIMEOUT_S = 30.0
+_FFMPEG_MIN_TIMEOUT_S = 120.0
+_FFMPEG_DEFAULT_TIMEOUT_S = 600.0
+
+
+def _ffprobe_run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_FFPROBE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"ffprobe timeout após {_FFPROBE_TIMEOUT_S:.0f}s — arquivo corrompido ou ilegível?"
+        ) from exc
+
+
+def _ffmpeg_timeout(duration: float | None) -> float:
+    if duration is not None and duration > 0:
+        # 4× duração + margem, com piso; re-encode pesado de 2h não deve estourar cedo
+        return max(_FFMPEG_MIN_TIMEOUT_S, duration * 4.0 + 60.0)
+    return _FFMPEG_DEFAULT_TIMEOUT_S
+
 
 def probe_audio_streams(input_path: Path) -> int:
     """Retorna o número de streams de áudio no arquivo via ffprobe."""
@@ -27,7 +54,7 @@ def probe_audio_streams(input_path: Path) -> int:
         "-select_streams", "a",
         str(input_path),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = _ffprobe_run(cmd)
     if proc.returncode != 0:
         raise RuntimeError(f"ffprobe falhou ao listar streams: {proc.stderr[:500]}")
     data = json.loads(proc.stdout)
@@ -42,7 +69,7 @@ def _probe_duration(input_path: Path) -> float:
         "-show_format",
         str(input_path),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = _ffprobe_run(cmd)
     if proc.returncode != 0:
         raise RuntimeError(f"ffprobe falhou ao ler duração: {proc.stderr[:500]}")
     data = json.loads(proc.stdout)
@@ -54,8 +81,14 @@ def _run_ffmpeg(
     *,
     duration: float | None = None,
     on_progress: AudioProgress | None = None,
+    timeout: float | None = None,
 ) -> None:
-    """Executa ffmpeg e reporta avanço temporal quando a duração é conhecida."""
+    """Executa ffmpeg e reporta avanço temporal quando a duração é conhecida.
+
+    ``timeout`` em segundos; se omitido, deriva da duração do media.
+    """
+    limit = timeout if timeout is not None else _ffmpeg_timeout(duration)
+    deadline = time.monotonic() + limit
     with tempfile.TemporaryFile(mode="w+") as errors:
         proc = subprocess.Popen(
             ["ffmpeg", "-y", "-progress", "pipe:1", "-nostats", *args],
@@ -64,16 +97,45 @@ def _run_ffmpeg(
             text=True,
         )
         assert proc.stdout is not None
-        for line in proc.stdout:
-            if not line.startswith("out_time_us=") or not duration or duration <= 0:
-                continue
+        try:
+            for line in proc.stdout:
+                if time.monotonic() > deadline:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    raise RuntimeError(
+                        f"ffmpeg timeout após {limit:.0f}s — arquivo corrompido ou travado?"
+                    )
+                if not line.startswith("out_time_us=") or not duration or duration <= 0:
+                    continue
+                try:
+                    elapsed = int(line.split("=", 1)[1]) / 1_000_000
+                except ValueError:
+                    continue
+                if on_progress is not None:
+                    on_progress(min(elapsed / duration, 1.0))
+            remaining = max(0.1, deadline - time.monotonic())
             try:
-                elapsed = int(line.split("=", 1)[1]) / 1_000_000
-            except ValueError:
-                continue
-            if on_progress is not None:
-                on_progress(min(elapsed / duration, 1.0))
-        returncode = proc.wait()
+                returncode = proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                raise RuntimeError(
+                    f"ffmpeg timeout após {limit:.0f}s — arquivo corrompido ou travado?"
+                ) from None
+        except Exception:
+            if proc.poll() is None:
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            raise
         if returncode != 0:
             errors.seek(0)
             raise RuntimeError(f"ffmpeg falhou: {errors.read()[-500:]}")
@@ -186,7 +248,7 @@ def probe_video_streams(input_path: Path) -> int:
         "-select_streams", "v",
         str(input_path),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = _ffprobe_run(cmd)
     if proc.returncode != 0:
         raise RuntimeError(f"ffprobe falhou ao listar vídeo: {proc.stderr[:500]}")
     data = json.loads(proc.stdout)
@@ -202,7 +264,10 @@ def probe_video_size(input_path: Path) -> tuple[int, int]:
         "-select_streams", "v:0",
         str(input_path),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = _ffprobe_run(cmd)
+    except RuntimeError:
+        return 0, 0
     if proc.returncode != 0:
         return 0, 0
     streams = json.loads(proc.stdout).get("streams") or []
@@ -253,7 +318,7 @@ def _preview_is_browser_safe(path: Path, quality: str = PREVIEW_WEB) -> bool:
             "-select_streams", "v:0",
             str(path),
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = _ffprobe_run(cmd)
         if proc.returncode != 0:
             return False
         streams = json.loads(proc.stdout).get("streams") or []
