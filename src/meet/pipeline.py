@@ -406,8 +406,7 @@ def _run(
 
     tracker.start("save", "Salvando markdown e banco")
     md_content = render_mod.to_markdown(result)
-    filename = render_mod.meeting_filename(result)
-    md_path = settings.output_dir / filename
+    md_path = render_mod.allocate_meeting_md_path(settings.output_dir, result)
     md_path.write_text(md_content, encoding="utf-8")
     meeting_id = store.save_meeting(result, md_path, project_id=project_id)
     result.visual_evidence = store.replace_visual_evidence(

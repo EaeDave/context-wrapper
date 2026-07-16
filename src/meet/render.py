@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from pathlib import Path
 
 from .models import FACT_KIND_LABELS, FACT_KINDS, MeetingResult, VisualEvidence
 
@@ -178,12 +179,36 @@ def to_markdown(result: MeetingResult) -> str:
     return "\n".join(lines)
 
 
-def meeting_filename(result: MeetingResult) -> str:
+def meeting_filename(
+    result: MeetingResult,
+    *,
+    disambiguator: str | None = None,
+) -> str:
     """Gera nome de arquivo YYYY-MM-DD-slug-do-titulo.md.
 
     Slug: ASCII lowercase, hífens, sem acentos (NFKD + encode ascii ignore).
+    ``disambiguator`` evita colisão (ex. ``2`` → date-slug-2.md).
     """
     nfkd = unicodedata.normalize("NFKD", result.title)
     ascii_str = nfkd.encode("ascii", errors="ignore").decode("ascii")
     slug = re.sub(r"[^a-z0-9]+", "-", ascii_str.lower()).strip("-")
-    return f"{result.date}-{slug}.md"
+    parts = [result.date]
+    if slug:
+        parts.append(slug)
+    if disambiguator:
+        parts.append(disambiguator)
+    return "-".join(parts) + ".md"
+
+
+def allocate_meeting_md_path(output_dir: Path, result: MeetingResult) -> Path:
+    """Caminho único sob output_dir (não sobrescreve .md existente)."""
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    candidate = out / meeting_filename(result)
+    if not candidate.exists():
+        return candidate
+    for n in range(2, 10_000):
+        candidate = out / meeting_filename(result, disambiguator=str(n))
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Não foi possível alocar nome de markdown em {out}")

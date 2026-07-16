@@ -12,10 +12,9 @@ Contracts defended:
 
 from __future__ import annotations
 
-import pytest
 
 from meet.models import ActionItem, MeetingFact, MeetingResult, TranscriptSegment, VisualEvidence
-from meet.render import meeting_filename, to_markdown
+from meet.render import allocate_meeting_md_path, meeting_filename, to_markdown
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +63,7 @@ def test_to_markdown_consecutive_same_speaker_grouped() -> None:
     ]
     md = to_markdown(_result(segments=segs))
     # Only one Alice header; combined text appears together
-    alice_lines = [l for l in md.splitlines() if "Alice:" in l]
+    alice_lines = [line for line in md.splitlines() if "Alice:" in line]
     assert len(alice_lines) == 1
     assert "Hello" in alice_lines[0]
     assert "World" in alice_lines[0]
@@ -78,7 +77,7 @@ def test_to_markdown_non_consecutive_same_speaker_split() -> None:
         _seg(2, 3, "Part two", "Alice"),
     ]
     md = to_markdown(_result(segments=segs))
-    alice_lines = [l for l in md.splitlines() if "Alice:" in l]
+    alice_lines = [line for line in md.splitlines() if "Alice:" in line]
     assert len(alice_lines) == 2
 
 
@@ -277,3 +276,13 @@ def test_meeting_filename_no_leading_or_trailing_hyphens_in_slug() -> None:
     slug = fname.removeprefix("2024-01-01-").removesuffix(".md")
     assert not slug.startswith("-")
     assert not slug.endswith("-")
+
+
+def test_allocate_meeting_md_path_avoids_collision(tmp_path) -> None:
+    r = _result(date="2024-01-15", title="Planning Meeting")
+    first = allocate_meeting_md_path(tmp_path, r)
+    first.write_text("a")
+    second = allocate_meeting_md_path(tmp_path, r)
+    assert first != second
+    assert second.name == "2024-01-15-planning-meeting-2.md"
+    assert not second.exists()
