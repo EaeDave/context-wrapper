@@ -27,7 +27,8 @@ gravação (OBS) ──> wav 16k ──> transcrição + diarização ──> LL
   Clicar em qualquer thumbnail leva o player ao instante correspondente. Falha
   em um frame ou transporte sem imagens degrada para o transcript. **Jobs
   internos:** `process`, `reprocess`; **endpoint interno:** `POST /api/process`;
-  **integrações externas:** Anthropic, OpenAI ou Ollama com modelo visual.
+  **integrações externas:** Anthropic, OpenAI por API key ou ChatGPT/Codex OAuth,
+  e Ollama com modelo visual.
 - A extração preserva todas as tarefas discutidas, inclusive as atribuídas só a
   terceiros, e separa quem pediu de quem executará. Também registra decisões,
   requisitos, restrições e questões em aberto. Tarefas e fatos guardam o trecho

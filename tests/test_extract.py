@@ -890,6 +890,149 @@ def test_openai_oauth_provider_consome_stream_responses(
     assert captured["json"]["stream"] is True
 
 
+def test_openai_oauth_provider_envia_imagens_no_responses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Codex OAuth recebe data URLs como input_image na mensagem do usuário."""
+    import httpx
+
+    captured: dict = {}
+    image_path = tmp_path / "frame.jpg"
+    image_path.write_bytes(b"jpeg-frame")
+
+    class FakeResponse:
+        status_code = 200
+        is_success = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def iter_lines():
+            return iter([
+                'data: {"type":"response.output_text.delta","delta":"{\\"observations\\":[]}"}',
+                'data: {"type":"response.completed","response":{"id":"resp-visual"}}',
+                "data: [DONE]",
+            ])
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def stream(method, url, **kwargs):
+            captured.update(method=method, url=url, **kwargs)
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+    monkeypatch.setattr(
+        "meet.openai_oauth.get_access_token",
+        lambda _settings, **_kwargs: "oauth-access",
+    )
+    monkeypatch.setattr(
+        "meet.openai_oauth.load_tokens",
+        lambda _settings: {"account_id": "account-123"},
+    )
+    provider = extract_mod.OpenAIOAuthProvider(
+        Settings(
+            llm_provider="openai",
+            llm_model="gpt-5.6-terra",
+            data_dir=tmp_path,
+        )
+    )
+
+    result = provider.complete_with_images(
+        "system visual",
+        "descreva",
+        [extract_mod.ImageContent(path=image_path, timestamp=65)],
+    )
+
+    assert result == '{"observations":[]}'
+    content = captured["json"]["input"][0]["content"]
+    assert content[0] == {"type": "input_text", "text": "Timestamp 00:01:05"}
+    assert content[1]["type"] == "input_image"
+    assert content[1]["detail"] == "low"
+    assert content[1]["image_url"].startswith("data:image/jpeg;base64,")
+    assert content[2] == {"type": "input_text", "text": "descreva"}
+    assert captured["headers"]["ChatGPT-Account-ID"] == "account-123"
+
+
+def test_openai_oauth_visual_renova_token_apos_401(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """O envio de frames repete uma vez com token renovado após rejeição."""
+    import httpx
+
+    image_path = tmp_path / "frame.jpg"
+    image_path.write_bytes(b"jpeg-frame")
+    authorizations: list[str] = []
+    refresh_calls: list[str | None] = []
+
+    class FakeResponse:
+        def __init__(self, unauthorized: bool):
+            self.status_code = 401 if unauthorized else 200
+            self.is_success = not unauthorized
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def iter_lines():
+            return iter([
+                'data: {"type":"response.output_text.delta","delta":"ok"}',
+                "data: [DONE]",
+            ])
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def stream(_method, _url, **kwargs):
+            authorization = kwargs["headers"]["Authorization"]
+            authorizations.append(authorization)
+            return FakeResponse(authorization == "Bearer stale")
+
+    def fake_access(_settings, *, rejected_access=None):
+        refresh_calls.append(rejected_access)
+        return "fresh" if rejected_access else "stale"
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+    monkeypatch.setattr("meet.openai_oauth.get_access_token", fake_access)
+    monkeypatch.setattr("meet.openai_oauth.load_tokens", lambda _settings: {})
+    provider = extract_mod.OpenAIOAuthProvider(
+        Settings(llm_provider="openai", llm_model="gpt-5.6-terra", data_dir=tmp_path)
+    )
+
+    result = provider.complete_with_images(
+        "system",
+        "descreva",
+        [extract_mod.ImageContent(path=image_path, timestamp=1)],
+    )
+
+    assert result == "ok"
+    assert authorizations == ["Bearer stale", "Bearer fresh"]
+    assert refresh_calls == [None, "stale"]
+
+
 def test_get_provider_unknown_provider_raises() -> None:
     """Unknown provider name raises ValueError."""
     s = Settings(llm_provider="llama", anthropic_api_key="x")

@@ -399,6 +399,35 @@ class OpenAIOAuthProvider(LLMProvider):
         return self._resolved_model
 
     def complete(self, system: str, user: str) -> str:
+        return self._complete_content(
+            system,
+            [{"type": "input_text", "text": user}],
+        )
+
+    def complete_with_images(
+        self, system: str, user: str, images: list[ImageContent]
+    ) -> str:
+        content: list[dict] = []
+        for image in images:
+            content.extend(
+                [
+                    {
+                        "type": "input_text",
+                        "text": f"Timestamp {_fmt_timestamp(image.timestamp)}",
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": (
+                            f"data:image/jpeg;base64,{_image_base64(image)}"
+                        ),
+                        "detail": "low",
+                    },
+                ]
+            )
+        content.append({"type": "input_text", "text": user})
+        return self._complete_content(system, content)
+
+    def _complete_content(self, system: str, content: list[dict]) -> str:
         import json
 
         import httpx
@@ -426,7 +455,7 @@ class OpenAIOAuthProvider(LLMProvider):
                 {
                     "type": "message",
                     "role": "user",
-                    "content": [{"type": "input_text", "text": user}],
+                    "content": content,
                 }
             ],
             "tools": [],
