@@ -475,6 +475,18 @@ class Store:
                 item.id = cursor.lastrowid
         return staged
 
+    def get_visual_evidence_path(
+        self,
+        meeting_id: int,
+        evidence_id: int,
+    ) -> str | None:
+        """Retorna path de uma evidência pertencente à reunião."""
+        row = self._conn.execute(
+            "SELECT image_path FROM visual_evidence WHERE id = ? AND meeting_id = ?",
+            (evidence_id, meeting_id),
+        ).fetchone()
+        return str(row["image_path"]) if row is not None else None
+
 
     def get_meeting(self, meeting_id: int) -> MeetingResult | None:
         """Reconstrói MeetingResult; anexa attrs de mídia/md_path."""

@@ -1,5 +1,7 @@
 """Persistência, vínculo temporal e API de evidências visuais."""
 
+
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -80,3 +82,30 @@ def test_visual_evidence_api_lista_e_serve_thumbnail(
     assert thumbnail.status_code == 200
     assert thumbnail.headers["content-type"].startswith("image/jpeg")
     assert thumbnail.content == b"jpeg-content"
+
+
+def test_visual_evidence_api_suporta_thumbnails_concorrentes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import meet.web.app as app_module
+    from meet.config import Settings
+
+    settings = Settings(data_dir=tmp_path / "data", output_dir=tmp_path / "output")
+    store = Store(settings.db_path)
+    meeting_id = store.save_meeting(_meeting(), tmp_path / "meeting.md")
+    source = tmp_path / "frame.jpg"
+    source.write_bytes(b"jpeg-content")
+    evidence = store.replace_visual_evidence(
+        meeting_id,
+        [VisualEvidence(40, str(source), "Tela cadastro", ["CNPJ"], "high")],
+        settings.data_dir,
+    )[0]
+    monkeypatch.setattr(app_module, "_settings_store", lambda: (settings, store))
+    client = TestClient(app_module.create_app())
+    url = f"/api/meetings/{meeting_id}/visual-evidence/{evidence.id}"
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        responses = list(pool.map(lambda _index: client.get(url), range(64)))
+
+    assert {response.status_code for response in responses} == {200}
+    assert {response.content for response in responses} == {b"jpeg-content"}

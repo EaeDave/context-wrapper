@@ -736,13 +736,10 @@ def create_app() -> FastAPI:
     @app.get("/api/meetings/{meeting_id}/visual-evidence/{evidence_id}")
     def api_visual_evidence(meeting_id: int, evidence_id: int) -> FileResponse:
         settings, store = _settings_store()
-        row = store._conn.execute(
-            "SELECT image_path FROM visual_evidence WHERE id = ? AND meeting_id = ?",
-            (evidence_id, meeting_id),
-        ).fetchone()
-        if row is None:
+        image_path = store.get_visual_evidence_path(meeting_id, evidence_id)
+        if image_path is None:
             raise HTTPException(404, "Evidência visual não encontrada")
-        path = Path(row["image_path"]).resolve()
+        path = Path(image_path).resolve()
         allowed = (settings.data_dir / "media" / str(meeting_id) / "visual").resolve()
         if not path.is_relative_to(allowed) or not path.is_file():
             raise HTTPException(404, "Arquivo da evidência visual não encontrado")
