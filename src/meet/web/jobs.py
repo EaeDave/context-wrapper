@@ -7,7 +7,6 @@ import logging
 import sqlite3
 import threading
 import time
-import traceback
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -176,13 +175,27 @@ class JobManager:
             logger.exception("jobs: falha ao persistir job %s", job.id)
 
     def _recover(self) -> None:
-        """Carrega jobs da tabela e corrige jobs presos em queued/running."""
+        """Carrega jobs da tabela e corrige jobs presos em queued/running.
+
+        Sempre recupera *todos* os non-terminais (não podem ficar stuck invisíveis
+        após >100 jobs históricos). Terminais: só os N mais recentes (DESC).
+        """
         if self._conn is None:
             return
         try:
             with self._db_lock:
-                rows = self._conn.execute(
-                    "SELECT * FROM jobs ORDER BY created_at ASC LIMIT 100"
+                # Non-terminais: sem LIMIT — restart não pode deixar job recente
+                # em running eterno fora da memória.
+                active_rows = self._conn.execute(
+                    "SELECT * FROM jobs"
+                    " WHERE status IN ('queued', 'running')"
+                    " ORDER BY created_at ASC"
+                ).fetchall()
+                terminal_rows = self._conn.execute(
+                    "SELECT * FROM jobs"
+                    " WHERE status IN ('done', 'error')"
+                    " ORDER BY created_at DESC"
+                    f" LIMIT {self._MEMORY_CAP}"
                 ).fetchall()
         except Exception:
             logger.exception("jobs: falha ao carregar jobs no startup")
@@ -190,7 +203,17 @@ class JobManager:
 
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         stuck: list[Job] = []
-        for row in rows:
+        # Ordem de memória: terminais antigos→recentes + non-terminais por created_at
+        # (list_recent inverte; terminais DESC no SQL → reverse para ASC no _order).
+        for row in reversed(terminal_rows):
+            try:
+                job = _row_to_job(row)
+            except Exception:
+                continue
+            self._jobs[job.id] = job
+            self._order.append(job.id)
+
+        for row in active_rows:
             try:
                 job = _row_to_job(row)
             except Exception:
@@ -211,6 +234,9 @@ class JobManager:
 
     # ── API pública ──────────────────────────────────────────────────────────
 
+    # Quantos jobs terminais manter em memória (lista da UI + get).
+    _MEMORY_CAP = 100
+
     def submit(self, kind: str, label: str, **params: Any) -> Job:
         job = Job(id=uuid.uuid4().hex[:10], kind=kind, label=label, params=params)
         with self._cv:
@@ -227,7 +253,50 @@ class JobManager:
     def list_recent(self, limit: int = 20) -> list[Job]:
         with self._lock:
             ids = list(reversed(self._order))[:limit]
-            return [self._jobs[i] for i in ids]
+            return [self._jobs[i] for i in ids if i in self._jobs]
+
+    def retry(self, job_id: str) -> Job | None:
+        """Reenvia um job terminal com os mesmos kind/params. None se não existir ou ainda ativo."""
+        with self._lock:
+            old = self._jobs.get(job_id)
+            if old is None:
+                return None
+            if old.status not in (JobStatus.done, JobStatus.error):
+                return None
+            kind = old.kind
+            label = old.label
+            params = dict(old.params)
+        return self.submit(kind=kind, label=f"retry · {label}", **params)
+
+    def _evict_old_jobs(self) -> None:
+        """Corta só jobs *terminais* antigos; nunca descarta queued/running.
+
+        Com fila longa, manter os últimos N de ``_order`` inteiro apagava
+        queued no começo da fila — o worker nunca os pegava de novo.
+        """
+        with self._lock:
+            active: list[str] = []
+            terminals: list[str] = []
+            for jid in self._order:
+                job = self._jobs.get(jid)
+                if job is None:
+                    continue
+                if job.status in (JobStatus.queued, JobStatus.running):
+                    active.append(jid)
+                else:
+                    terminals.append(jid)
+            if len(terminals) <= self._MEMORY_CAP and len(active) + len(terminals) == len(
+                self._order
+            ):
+                # Nada a cortar (e _order só tem ids vivos)
+                if all(j in self._jobs for j in self._order):
+                    return
+            keep_terminals = terminals[-self._MEMORY_CAP :]
+            keep_set = set(active) | set(keep_terminals)
+            self._order = [jid for jid in self._order if jid in keep_set]
+            for jid in list(self._jobs):
+                if jid not in keep_set:
+                    del self._jobs[jid]
 
     # ── Worker ───────────────────────────────────────────────────────────────
 
@@ -239,7 +308,8 @@ class JobManager:
                         (
                             jid
                             for jid in self._order
-                            if self._jobs[jid].status == JobStatus.queued
+                            if jid in self._jobs
+                            and self._jobs[jid].status == JobStatus.queued
                         ),
                         None,
                     )
@@ -272,10 +342,13 @@ class JobManager:
                         timespec="seconds"
                     )
                 self._persist(job)
+                self._evict_old_jobs()
             except Exception as exc:
+                logger.exception("job %s (%s) falhou", job.id, job.kind)
                 with self._lock:
                     job.status = JobStatus.error
-                    job.error = f"{exc}\n{traceback.format_exc()[-800:]}"
+                    # Mensagem curta para a API/UI; traceback só no log do servidor.
+                    job.error = str(exc)[:500] or exc.__class__.__name__
                     job.stage = "Falhou"
                     if job.progress is not None:
                         job.progress = job.progress.failed(str(exc))
@@ -283,6 +356,7 @@ class JobManager:
                         timespec="seconds"
                     )
                 self._persist(job)
+                self._evict_old_jobs()
 
     def _run(self, job: Job) -> None:
         from ..config import load_settings
@@ -395,7 +469,7 @@ class JobManager:
             from ..pipeline import reprocess_meeting
 
             meeting_id = int(job.params["meeting_id"])
-            result = reprocess_meeting(
+            reprocess_meeting(
                 meeting_id,
                 settings=settings,
                 store=store,
@@ -406,12 +480,10 @@ class JobManager:
                 num_speakers=int(job.params.get("num_speakers", 0)),
                 on_progress=progress,
             )
-            row = store._conn.execute(
-                "SELECT md_path FROM meetings WHERE id = ?", (meeting_id,)
-            ).fetchone()
+            md_path = store.get_meeting_md_path(meeting_id)
             with self._lock:
                 job.meeting_id = meeting_id
-                job.result_path = row["md_path"] if row else None
+                job.result_path = md_path
             return
 
         if job.kind == "reextract":

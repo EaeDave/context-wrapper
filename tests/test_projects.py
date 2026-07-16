@@ -18,7 +18,6 @@ Contracts defended:
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -282,7 +281,7 @@ def test_project_meeting_count(tmp_store: Store) -> None:
 def test_project_task_counts(tmp_store: Store) -> None:
     pid = tmp_store.create_project("TaskCount")
     items = [_ai("Open1"), _ai("Open2"), _ai("Done", status="feito")]
-    mid = tmp_store.save_meeting(_meeting(action_items=items), Path("/tmp/tc.md"), project_id=pid)
+    tmp_store.save_meeting(_meeting(action_items=items), Path("/tmp/tc.md"), project_id=pid)
     proj = tmp_store.get_project(pid)
     assert proj.open_task_count == 2
     assert proj.done_task_count == 1
@@ -498,7 +497,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     from meet.store import Store as RealStore
 
     db = tmp_path / "api_test.db"
-    store = RealStore(db)
+    RealStore(db)
 
     settings_mock = MagicMock()
     settings_mock.db_path = db
@@ -602,7 +601,6 @@ def test_api_delete_project_missing_404(client: TestClient) -> None:
 
 def test_api_delete_project_unassigns_meetings(client: TestClient, tmp_path: Path) -> None:
     """DELETE /api/projects/{id} must not delete meetings — only disassociate."""
-    from meet.store import Store as RealStore
 
     # Create project via API then add meeting directly in store
     pid = client.post("/api/projects", json={"name": "ToDelete"}).json()["id"]
@@ -939,7 +937,9 @@ def test_api_meeting_detail_includes_project_name(api_client) -> None:
 
 def test_api_process_rejects_missing_project(api_client, tmp_path: Path) -> None:
     tc, _ = api_client
-    video = tmp_path / "meeting.mkv"
+    # path precisa estar sob $HOME (política de FS da API)
+    video = Path.home() / ".cache" / "meet-test-process" / "meeting.mkv"
+    video.parent.mkdir(parents=True, exist_ok=True)
     video.write_bytes(b"media")
 
     response = tc.post(

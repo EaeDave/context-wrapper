@@ -181,10 +181,7 @@ def test_list_recent_order(tmp_path: Path) -> None:
     assert recent[2].id == j1.id
 
 
-def test_done_jobs_carregados_na_recovery(tmp_path: Path) -> None:
-    """Jobs done/error da sessão anterior devem aparecer na nova instância."""
-    db = tmp_path / "meet.db"
-
+def _seed_jobs_table(db: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db))
     conn.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
@@ -201,6 +198,76 @@ def test_done_jobs_carregados_na_recovery(tmp_path: Path) -> None:
           params TEXT NOT NULL DEFAULT '{}'
         )
     """)
+    return conn
+
+
+def test_recovery_recent_running_not_lost_when_history_exceeds_cap(tmp_path: Path) -> None:
+    """Com >MEMORY_CAP jobs done antigos, job running *recente* ainda é interrompido.
+
+    Antes: ORDER BY created_at ASC LIMIT 100 só via o histórico velho e o
+    running recente ficava stuck no SQLite fora da memória.
+    """
+    db = tmp_path / "meet.db"
+    conn = _seed_jobs_table(db)
+    # 120 jobs done antigos
+    for i in range(120):
+        conn.execute(
+            "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                f"old{i:04d}",
+                "process",
+                f"Old {i}",
+                "done",
+                "Pronto",
+                None,
+                None,
+                None,
+                f"2020-01-01T{i // 60:02d}:{i % 60:02d}:00",
+                f"2020-01-01T{i // 60:02d}:{i % 60:02d}:30",
+                "{}",
+            ),
+        )
+    # Job running *mais recente* — deve ser recuperado e marcado error
+    conn.execute(
+        "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "recentrun",
+            "process",
+            "Recente preso",
+            "running",
+            "Transcrevendo…",
+            None,
+            99,
+            None,
+            "2026-07-15T12:00:00",
+            None,
+            "{}",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    mgr = JobManager(db_path=db)
+    job = mgr.get("recentrun")
+    assert job is not None, "running recente deve estar em memória após recovery"
+    assert job.status == JobStatus.error
+    assert "Interrompido" in (job.error or "")
+
+    conn2 = sqlite3.connect(str(db))
+    conn2.row_factory = sqlite3.Row
+    row = conn2.execute(
+        "SELECT status, error FROM jobs WHERE id = 'recentrun'"
+    ).fetchone()
+    conn2.close()
+    assert row["status"] == "error"
+    assert "Interrompido" in (row["error"] or "")
+
+
+def test_done_jobs_carregados_na_recovery(tmp_path: Path) -> None:
+    """Jobs done/error da sessão anterior devem aparecer na nova instância."""
+    db = tmp_path / "meet.db"
+
+    conn = _seed_jobs_table(db)
     conn.execute(
         "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         ("done01", "process", "Concluído", "done", "Pronto",
@@ -215,6 +282,76 @@ def test_done_jobs_carregados_na_recovery(tmp_path: Path) -> None:
     assert job.status == JobStatus.done
     assert job.meeting_id == 42
     assert job.params == {"v": 1}
+
+
+def test_evict_never_drops_queued_or_running(tmp_path: Path) -> None:
+    """Com >_MEMORY_CAP jobs, eviction só corta terminais — fila continua pickable.
+
+    Repro do bug: keep = _order[-CAP] apagava queued no início da lista.
+    """
+    db = tmp_path / "meet.db"
+    mgr = JobManager(db_path=db)
+    mgr._MEMORY_CAP = 5
+
+    queued_ids: list[str] = []
+    with mgr._lock:
+        # Terminais antigos no começo do order (como histórico longo)
+        for i in range(20):
+            jid = f"done{i:03d}"
+            mgr._jobs[jid] = Job(
+                id=jid,
+                kind="process",
+                label=f"done-{i}",
+                status=JobStatus.done,
+            )
+            mgr._order.append(jid)
+        # Muitos queued (backlog) — todos devem sobreviver
+        for i in range(12):
+            jid = f"queued{i:03d}"
+            mgr._jobs[jid] = Job(
+                id=jid,
+                kind="process",
+                label=f"q-{i}",
+                status=JobStatus.queued,
+            )
+            mgr._order.append(jid)
+            queued_ids.append(jid)
+        # Um running no meio
+        mgr._jobs["run001"] = Job(
+            id="run001",
+            kind="mix",
+            label="running",
+            status=JobStatus.running,
+        )
+        mgr._order.append("run001")
+
+    mgr._evict_old_jobs()
+
+    for qid in queued_ids:
+        job = mgr.get(qid)
+        assert job is not None, f"queued {qid} foi evicted indevidamente"
+        assert job.status == JobStatus.queued
+
+    running = mgr.get("run001")
+    assert running is not None and running.status == JobStatus.running
+
+    terminals = [
+        j for j in mgr._jobs.values() if j.status in (JobStatus.done, JobStatus.error)
+    ]
+    assert len(terminals) <= mgr._MEMORY_CAP
+
+    # Worker loop pick: primeiro queued ainda em _order ∩ _jobs
+    with mgr._lock:
+        next_id = next(
+            (
+                jid
+                for jid in mgr._order
+                if jid in mgr._jobs and mgr._jobs[jid].status == JobStatus.queued
+            ),
+            None,
+        )
+    assert next_id is not None
+    assert next_id in queued_ids
 
 
 def _progress(percent: float = 37.5) -> ProgressUpdate:
@@ -313,6 +450,38 @@ def test_recovery_marca_etapa_atual_como_error(tmp_path: Path) -> None:
     )
     assert current.state == "error"
     assert all(step.state != "running" for step in loaded.progress.steps)
+
+
+def test_job_error_omits_traceback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def run(self: JobManager, job: Job) -> None:
+        raise RuntimeError("falha controlada")
+
+    monkeypatch.setattr(JobManager, "_run", run)
+    mgr = JobManager(db_path=tmp_path / "meet.db")
+    job = mgr.submit("process", "Err")
+    _wait_for_status(mgr, job.id)
+    assert job.status == JobStatus.error
+    assert job.error is not None
+    assert "Traceback" not in job.error
+    assert "falha controlada" in job.error
+
+
+def test_job_retry_resubmits(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def run(self: JobManager, job: Job) -> None:
+        if job.params.get("boom"):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(JobManager, "_run", run)
+    mgr = JobManager(db_path=tmp_path / "meet.db")
+    job = mgr.submit("process", "Orig", boom=True, video="/tmp/x.mkv")
+    _wait_for_status(mgr, job.id)
+    assert job.status == JobStatus.error
+    again = mgr.retry(job.id)
+    assert again is not None
+    assert again.id != job.id
+    assert again.params.get("video") == "/tmp/x.mkv"
+    _wait_for_status(mgr, again.id)
+    assert again.status == JobStatus.error
 
 
 @pytest.mark.parametrize("fails", [False, True])

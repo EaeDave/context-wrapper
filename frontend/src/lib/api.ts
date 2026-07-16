@@ -12,12 +12,39 @@ import type {
   AuthorizeResult,
   OpenAIAuthorizeResult,
   ActionItem,
+  MeetingFact,
   Task,
   VoiceUsage,
   Project,
   ContextExportRequest,
   ContextExportResponse,
 } from "./types"
+
+function formatDetail(detail: unknown, status: number): string {
+  if (typeof detail === "string" && detail.trim()) return detail
+  if (Array.isArray(detail)) {
+    const parts = detail.map((item) => {
+      if (item && typeof item === "object" && "msg" in item) {
+        return String((item as { msg: unknown }).msg)
+      }
+      try {
+        return JSON.stringify(item)
+      } catch {
+        return String(item)
+      }
+    })
+    const joined = parts.filter(Boolean).join("; ")
+    if (joined) return joined
+  }
+  if (detail && typeof detail === "object") {
+    try {
+      return JSON.stringify(detail)
+    } catch {
+      /* fall through */
+    }
+  }
+  return `HTTP ${status}`
+}
 
 async function request<T>(
   method: string,
@@ -30,8 +57,27 @@ async function request<T>(
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
   if (res.status === 204) return undefined as T
-  const data = await res.json()
-  if (!res.ok) throw new Error(data.detail ?? `HTTP ${res.status}`)
+
+  const text = await res.text()
+  let data: unknown = null
+  if (text.trim()) {
+    try {
+      data = JSON.parse(text) as unknown
+    } catch {
+      if (!res.ok) {
+        throw new Error(text.trim().slice(0, 300) || `HTTP ${res.status}`)
+      }
+      throw new Error(`Resposta não-JSON de ${path} (HTTP ${res.status})`)
+    }
+  }
+
+  if (!res.ok) {
+    const detail =
+      data && typeof data === "object" && "detail" in data
+        ? (data as { detail: unknown }).detail
+        : data
+    throw new Error(formatDetail(detail, res.status))
+  }
   return data as T
 }
 
@@ -116,7 +162,7 @@ export const getSpeakers = (): Promise<Speaker[]> =>
   request("GET", "/api/speakers")
 
 export const deleteSpeaker = (name: string): Promise<void> =>
-  request("DELETE", `/api/speakers/${encodeURIComponent(name)}`)
+  request("DELETE", `/api/speakers?name=${encodeURIComponent(name)}`)
 
 export const getSettings = (): Promise<SettingsInfo> =>
   request("GET", "/api/settings")
@@ -167,9 +213,27 @@ export const updateActionItem = (
     priority: ActionItem["priority"]
     status: ActionItem["status"]
     due: string | null
+    review_status: ActionItem["review_status"]
+    explicitness: ActionItem["explicitness"]
+    evidence_quote: string | null
   }>,
 ): Promise<{ ok: true }> =>
   request("PATCH", `/api/action-items/${id}`, patch)
+
+export const updateMeetingFact = (
+  id: number,
+  patch: Partial<{
+    text: string
+    kind: MeetingFact["kind"]
+    review_status: MeetingFact["review_status"]
+    explicitness: MeetingFact["explicitness"]
+    evidence_quote: string | null
+  }>,
+): Promise<{ ok: true }> =>
+  request("PATCH", `/api/meeting-facts/${id}`, patch)
+
+export const retryJob = (id: string): Promise<Job> =>
+  request("POST", `/api/jobs/${id}/retry`)
 
 export const addActionItem = (
   meetingId: number,
@@ -226,10 +290,10 @@ export const renameVoice = (
   name: string,
   newName: string,
 ): Promise<{ ok: true }> =>
-  request("PATCH", `/api/speakers/${encodeURIComponent(name)}`, { new_name: newName })
+  request("PATCH", "/api/speakers", { name, new_name: newName })
 
 export const getVoiceUsage = (name: string): Promise<VoiceUsage[]> =>
-  request("GET", `/api/speakers/${encodeURIComponent(name)}/usage`)
+  request("GET", `/api/speakers/usage?name=${encodeURIComponent(name)}`)
 
 export const setTuning = (patch: {
   whisper_model?: string

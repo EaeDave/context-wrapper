@@ -13,10 +13,8 @@ Contracts defended:
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 from meet.models import ActionItem, MeetingFact, MeetingResult, TranscriptSegment
@@ -178,7 +176,7 @@ def test_action_item_assigned_to_none_roundtrip(tmp_store: Store) -> None:
 
 def test_list_tasks_includes_me(tmp_store: Store) -> None:
     """Tasks assigned to 'me' appear in list_tasks."""
-    mid = tmp_store.save_meeting(
+    tmp_store.save_meeting(
         _meeting(action_items=[_ai("minha tarefa", assigned_to=["me"])]),
         Path("/tmp/out.md"),
     )
@@ -188,7 +186,7 @@ def test_list_tasks_includes_me(tmp_store: Store) -> None:
 
 def test_list_tasks_includes_me_in_list(tmp_store: Store) -> None:
     """Tasks where assigned_to is a list containing 'me' appear in list_tasks."""
-    mid = tmp_store.save_meeting(
+    tmp_store.save_meeting(
         _meeting(action_items=[_ai("tarefa compartilhada", assigned_to=["me", "Alice"])]),
         Path("/tmp/out.md"),
     )
@@ -198,7 +196,7 @@ def test_list_tasks_includes_me_in_list(tmp_store: Store) -> None:
 
 def test_list_tasks_includes_no_owner(tmp_store: Store) -> None:
     """Tasks with no owner (assigned_to=None) appear in list_tasks."""
-    mid = tmp_store.save_meeting(
+    tmp_store.save_meeting(
         _meeting(action_items=[_ai("tarefa sem dono", assigned_to=None)]),
         Path("/tmp/out.md"),
     )
@@ -257,7 +255,7 @@ def test_list_tasks_returns_new_fields(tmp_store: Store) -> None:
 def test_project_task_counts_personal_semantics(tmp_store: Store) -> None:
     """open/done_task_count exclude third-party-only tasks; same semantics as list_tasks."""
     pid = tmp_store.create_project("Proj")
-    mid = tmp_store.save_meeting(
+    tmp_store.save_meeting(
         _meeting(
             project_id=pid,
             action_items=[

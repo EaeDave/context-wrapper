@@ -130,7 +130,12 @@ class MeetingFact:
 
 @dataclass
 class MeetingResult:
-    """Resultado consolidado de uma reunião processada."""
+    """Resultado consolidado de uma reunião processada.
+
+    Campos de pipeline (source…project_id) vêm do processamento; campos de
+    persistência/UI (meeting_id, md_path, mídia, timestamps) são preenchidos
+    por ``Store.get_meeting`` e opcionais no restante do fluxo.
+    """
 
     source: str
     date: str  # ISO YYYY-MM-DD
@@ -145,3 +150,11 @@ class MeetingResult:
     # nome_resolvido → score de cosseno; só entradas casadas (label≠nome)
     speaker_matches: dict[str, float] = field(default_factory=dict)
     project_id: int | None = None
+    # Persistência / UI (não exigidos na saída crua do pipeline)
+    meeting_id: int | None = None
+    md_path: Path | None = None
+    source_origin: str = ""
+    media_managed: bool = False
+    media_ok: bool = False
+    created_at: str = ""
+    updated_at: str = ""

@@ -357,12 +357,32 @@ export default function JobPage() {
                   <Link to="/settings">Reconectar {reconnectProvider}</Link>
                 </Button>
               )}
-              <Button variant="outline" size="sm" asChild>
-                <Link to="/new">
-                  <ArrowLeft className="size-4" />
-                  Tentar de novo
-                </Link>
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                {!needsLlmReconnect && (
+                  <Button
+                    variant="default"
+                    size="sm"
+                    onClick={() => {
+                      api
+                        .retryJob(job.id)
+                        .then((next) => {
+                          navigate(`/jobs/${next.id}`)
+                        })
+                        .catch((e: Error) => {
+                          console.error(e)
+                        })
+                    }}
+                  >
+                    Tentar de novo
+                  </Button>
+                )}
+                <Button variant="outline" size="sm" asChild>
+                  <Link to="/new">
+                    <ArrowLeft className="size-4" />
+                    Nova gravação
+                  </Link>
+                </Button>
+              </div>
             </div>
           )}
         </CardContent>

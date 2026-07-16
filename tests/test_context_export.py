@@ -132,7 +132,7 @@ def api_client(store_db: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[TestCli
 
 def test_list_tasks_personal_no_owner(tmp_store: Store) -> None:
     """Task with no assigned_to is included in personal scope."""
-    mid = tmp_store.save_meeting(
+    tmp_store.save_meeting(
         _meeting(action_items=[_ai("NoOwner")]), Path("/tmp/a.md")
     )
     tasks = tmp_store.list_tasks("aberto", scope="personal")
@@ -141,7 +141,7 @@ def test_list_tasks_personal_no_owner(tmp_store: Store) -> None:
 
 def test_list_tasks_personal_me_element(tmp_store: Store) -> None:
     """Task assigned to ['me'] is included in personal scope."""
-    mid = tmp_store.save_meeting(
+    tmp_store.save_meeting(
         _meeting(action_items=[_ai("MeTask", assigned_to=["me"])]), Path("/tmp/b.md")
     )
     tasks = tmp_store.list_tasks("aberto", scope="personal")
@@ -374,7 +374,7 @@ def test_context_export_mixed_missing_id_404(api_client) -> None:
     """Even if some IDs exist, a single missing one triggers 404."""
     tc, db = api_client
     s = Store(db)
-    mid = s.save_meeting(_meeting(action_items=[_ai("Real")]), Path("/tmp/me.md"))
+    s.save_meeting(_meeting(action_items=[_ai("Real")]), Path("/tmp/me.md"))
     tasks = s.list_tasks("aberto", scope="all")
     real_id = tasks[0]["id"]
     r = tc.post("/api/context/export", json={"task_ids": [real_id, 99999]})

@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from meet.models import ActionItem, MeetingResult, TranscriptSegment
+from meet.models import ActionItem, MeetingFact, MeetingResult, TranscriptSegment
 from meet import media
 from meet.store import Store
 
@@ -37,6 +37,7 @@ def _meeting(
     summary: str = "Resumo.",
     segments: list[TranscriptSegment] | None = None,
     action_items: list[ActionItem] | None = None,
+    facts: list[MeetingFact] | None = None,
 ) -> MeetingResult:
     return MeetingResult(
         source=source,
@@ -46,6 +47,7 @@ def _meeting(
         summary=summary,
         segments=segments or [],
         action_items=action_items or [],
+        facts=facts or [],
     )
 
 
@@ -77,6 +79,247 @@ def test_get_meeting_fields_roundtrip(tmp_store: Store) -> None:
     assert got.source == "recording.mkv"
     assert got.duration == pytest.approx(1800.0)
     assert got.summary == "We decided stuff."
+    assert got.meeting_id == mid
+    assert got.md_path == Path("/tmp/planning.md")
+    assert got.source_origin  # preenchido do banco
+
+
+def test_get_meeting_md_path(tmp_store: Store) -> None:
+    mid = tmp_store.save_meeting(_meeting(), Path("/tmp/out-md.md"))
+    assert tmp_store.get_meeting_md_path(mid) == "/tmp/out-md.md"
+    assert tmp_store.get_meeting_md_path(999_999) is None
+
+
+def test_corrupt_assigned_to_json_does_not_crash_get(tmp_store: Store) -> None:
+    """Célula JSON corrompida não deve derrubar get_meeting inteiro."""
+    mid = tmp_store.save_meeting(
+        _meeting(action_items=[ActionItem(what="t")]),
+        Path("/tmp/x.md"),
+    )
+    tmp_store._conn.execute(
+        "UPDATE action_items SET assigned_to = ? WHERE meeting_id = ?",
+        ("{{not-json", mid),
+    )
+    tmp_store._conn.commit()
+    got = tmp_store.get_meeting(mid)
+    assert got is not None
+    assert got.action_items[0].assigned_to is None
+
+
+def test_update_action_item_status_only_keeps_review_status(tmp_store: Store) -> None:
+    """Patch só de status não deve revalidar e reverter review_status confirmado."""
+    mid = tmp_store.save_meeting(
+        _meeting(
+            action_items=[
+                ActionItem(
+                    what="task",
+                    status="aberto",
+                    review_status="confirmed",
+                    evidence_quote="no match expected",
+                )
+            ],
+            segments=[TranscriptSegment(start=0, end=1, text="unrelated", speaker="A")],
+        ),
+        Path("/tmp/rv.md"),
+    )
+    got = tmp_store.get_meeting(mid)
+    assert got and got.action_items[0].id is not None
+    item_id = got.action_items[0].id
+    assert tmp_store.update_action_item(item_id, {"status": "feito"})
+    after = tmp_store.get_meeting(mid)
+    assert after is not None
+    assert after.action_items[0].status == "feito"
+    assert after.action_items[0].review_status == "confirmed"
+
+
+def test_update_action_item_manual_review_status_persists(tmp_store: Store) -> None:
+    """Toggle de review humano não pode ser sobrescrito por revalidação automática."""
+    mid = tmp_store.save_meeting(
+        _meeting(
+            action_items=[
+                ActionItem(
+                    what="task",
+                    status="aberto",
+                    review_status="needs_review",
+                    evidence_quote="no match expected",
+                )
+            ],
+            segments=[TranscriptSegment(start=0, end=1, text="unrelated", speaker="A")],
+        ),
+        Path("/tmp/rv2.md"),
+    )
+    got = tmp_store.get_meeting(mid)
+    assert got and got.action_items[0].id is not None
+    item_id = got.action_items[0].id
+
+    assert tmp_store.update_action_item(item_id, {"review_status": "confirmed"})
+    after = tmp_store.get_meeting(mid)
+    assert after is not None
+    assert after.action_items[0].review_status == "confirmed"
+
+    assert tmp_store.update_action_item(item_id, {"review_status": "needs_review"})
+    after2 = tmp_store.get_meeting(mid)
+    assert after2 is not None
+    assert after2.action_items[0].review_status == "needs_review"
+
+
+def test_update_meeting_extract_preserves_done_status(tmp_store: Store) -> None:
+    """Reextract não pode zerar status=feito / due de item casado por what+range."""
+    mid = tmp_store.save_meeting(
+        _meeting(
+            action_items=[
+                ActionItem(
+                    what="Ship login page",
+                    status="feito",
+                    due="2026-08-01",
+                    source_start=10.0,
+                    source_end=20.0,
+                )
+            ]
+        ),
+        Path("/tmp/re.md"),
+    )
+    # Marca feito no banco (já salvo) e reextrai com mesmo what/range status default
+    tmp_store.update_meeting_extract(
+        mid,
+        "novo resumo",
+        [
+            ActionItem(
+                what="Ship login page",
+                status="aberto",
+                due=None,
+                source_start=10.0,
+                source_end=20.0,
+            )
+        ],
+        None,
+        facts=[],
+    )
+    got = tmp_store.get_meeting(mid)
+    assert got is not None
+    assert len(got.action_items) == 1
+    assert got.action_items[0].status == "feito"
+    assert got.action_items[0].due == "2026-08-01"
+
+
+def test_update_meeting_extract_missing_meeting_raises(tmp_store: Store) -> None:
+    with pytest.raises(ValueError, match="não encontrada"):
+        tmp_store.update_meeting_extract(99999, "s", [], None)
+
+
+def test_update_meeting_extract_matches_what_when_range_shifts(
+    tmp_store: Store,
+) -> None:
+    """LLM que muda source_start/end mas mantém o what não deve zerar status=feito."""
+    mid = tmp_store.save_meeting(
+        _meeting(
+            action_items=[
+                ActionItem(
+                    what="Ship login page",
+                    status="feito",
+                    due="2026-08-01",
+                    source_start=10.0,
+                    source_end=20.0,
+                )
+            ]
+        ),
+        Path("/tmp/shift.md"),
+    )
+    tmp_store.update_meeting_extract(
+        mid,
+        "resumo",
+        [
+            ActionItem(
+                what="Ship login page",
+                status="aberto",
+                due=None,
+                source_start=12.5,  # range deslocado
+                source_end=22.0,
+            )
+        ],
+        None,
+        facts=[],
+    )
+    got = tmp_store.get_meeting(mid)
+    assert got is not None
+    assert got.action_items[0].status == "feito"
+    assert got.action_items[0].due == "2026-08-01"
+
+
+def test_replace_meeting_content_preserves_done_status(tmp_store: Store) -> None:
+    mid = tmp_store.save_meeting(
+        _meeting(
+            action_items=[
+                ActionItem(
+                    what="Fix bug",
+                    status="feito",
+                    due="2026-09-01",
+                    source_start=1.0,
+                    source_end=2.0,
+                )
+            ]
+        ),
+        Path("/tmp/rep.md"),
+    )
+    tmp_store.replace_meeting_content(
+        mid,
+        _meeting(
+            action_items=[
+                ActionItem(
+                    what="Fix bug",
+                    status="aberto",
+                    source_start=1.0,
+                    source_end=2.0,
+                )
+            ],
+            segments=[TranscriptSegment(start=0, end=1, text="hi", speaker="A")],
+        ),
+    )
+    got = tmp_store.get_meeting(mid)
+    assert got is not None
+    assert got.action_items[0].status == "feito"
+    assert got.action_items[0].due == "2026-09-01"
+
+
+def test_concurrent_list_and_save_do_not_raise(tmp_store: Store) -> None:
+    """Store singleton multi-thread: list + save concorrentes não corrompem."""
+    import threading
+
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(4)
+
+    def saver(n: int) -> None:
+        try:
+            barrier.wait()
+            for i in range(20):
+                tmp_store.save_meeting(
+                    _meeting(title=f"t{n}-{i}"),
+                    Path(f"/tmp/t{n}-{i}.md"),
+                )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def lister() -> None:
+        try:
+            barrier.wait()
+            for _ in range(40):
+                tmp_store.list_meeting_rows()
+                tmp_store.list_meetings()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=saver, args=(0,)),
+        threading.Thread(target=saver, args=(1,)),
+        threading.Thread(target=lister),
+        threading.Thread(target=lister),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors
+    assert len(tmp_store.list_meetings()) == 40
 
 
 def test_get_meeting_segments_roundtrip(tmp_store: Store) -> None:
@@ -218,6 +461,16 @@ def test_search_action_item_kind_correct(tmp_store: Store) -> None:
     assert "action_item" in kinds
 
 
+def test_search_invalid_fts_syntax_returns_empty(tmp_store: Store) -> None:
+    """Aspas desbalanceadas / operadores FTS não devem estourar OperationalError."""
+    tmp_store.save_meeting(
+        _meeting(segments=[TranscriptSegment(0, 1, "hello", "me")]),
+        Path("/tmp/x.md"),
+    )
+    assert tmp_store.search('"unbalanced') == []
+    assert tmp_store.search("AND") == [] or isinstance(tmp_store.search("AND"), list)
+
+
 def test_search_missing_term_returns_empty(tmp_store: Store) -> None:
     """A query that matches nothing returns an empty list (not an error)."""
     segs = [TranscriptSegment(start=0, end=1, text="hello world")]
@@ -289,6 +542,43 @@ def test_update_speaker_fts_still_searchable(tmp_store: Store) -> None:
 
     results = tmp_store.search("searchabletoken")
     assert any(r["meeting_id"] == mid for r in results)
+
+
+def test_update_speaker_preserves_fact_fts(tmp_store: Store) -> None:
+    """Assign/rename speaker must not drop kind=fact from the FTS index."""
+    fact_word = "factuniquezz99"
+    mid = tmp_store.save_meeting(
+        _meeting(
+            segments=[TranscriptSegment(start=0, end=1, text="hello", speaker="SPEAKER_00")],
+            facts=[MeetingFact(kind="decision", text=f"Decisão {fact_word}")],
+        ),
+        Path("/tmp/x.md"),
+    )
+    assert any(r["kind"] == "fact" for r in tmp_store.search(fact_word))
+
+    tmp_store.update_speaker(mid, "SPEAKER_00", "Alice")
+
+    hits = tmp_store.search(fact_word)
+    assert any(r["meeting_id"] == mid and r["kind"] == "fact" for r in hits), hits
+
+
+def test_update_meeting_fact_reindexes_fts(tmp_store: Store) -> None:
+    """Edited fact text must appear in search; old wording must not linger alone."""
+    mid = tmp_store.save_meeting(
+        _meeting(
+            facts=[MeetingFact(kind="requirement", text="oldfactword11")],
+        ),
+        Path("/tmp/x.md"),
+    )
+    got = tmp_store.get_meeting(mid)
+    assert got is not None and got.facts
+    fact_id = got.facts[0].id
+    assert fact_id is not None
+
+    assert tmp_store.update_meeting_fact(fact_id, {"text": "newfactword22"})
+
+    assert any(r["meeting_id"] == mid for r in tmp_store.search("newfactword22"))
+    assert not any(r["meeting_id"] == mid for r in tmp_store.search("oldfactword11"))
 
 
 # ---------------------------------------------------------------------------

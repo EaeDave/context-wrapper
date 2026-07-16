@@ -14,7 +14,6 @@ Contracts defended:
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from meet.voicebank import enroll, resolve
 

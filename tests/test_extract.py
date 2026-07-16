@@ -12,14 +12,18 @@ from meet.extract import (
     _action_item_from_dict,
     _action_item_is_for_owner,
     _deduplicate_action_items,
+    _fact_from_dict,
+    _normalize_assigned_to,
     _parse_json_response,
+    _parse_hms,
     _split_transcript,
+    _validate_evidence,
     extract,
     get_provider,
     validate_credentials,
     LLMProvider,
 )
-from meet.models import ActionItem, TranscriptSegment
+from meet.models import TranscriptSegment
 
 
 # ---------------------------------------------------------------------------
@@ -606,8 +610,10 @@ def test_anthropic_retry_recupera_http_transitorio(
             calls.append(1)
             return httpx.Response(status_code if len(calls) == 1 else 200)
 
-    monkeypatch.setattr(extract_mod, "_HTTP_RETRY_DELAYS", (0.0,))
-    response = extract_mod._anthropic_post_with_retry(
+    import meet.llm_providers as llm_mod
+
+    monkeypatch.setattr(llm_mod, "_HTTP_RETRY_DELAYS", (0.0,))
+    response = llm_mod._anthropic_post_with_retry(
         Client(), "https://example.test", payload={}, headers={}
     )
 
@@ -619,6 +625,7 @@ def test_anthropic_retry_nao_repete_http_permanente(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import httpx
+    import meet.llm_providers as llm_mod
 
     calls: list[int] = []
 
@@ -627,8 +634,8 @@ def test_anthropic_retry_nao_repete_http_permanente(
             calls.append(1)
             return httpx.Response(400)
 
-    monkeypatch.setattr(extract_mod, "_HTTP_RETRY_DELAYS", (0.0,))
-    response = extract_mod._anthropic_post_with_retry(
+    monkeypatch.setattr(llm_mod, "_HTTP_RETRY_DELAYS", (0.0,))
+    response = llm_mod._anthropic_post_with_retry(
         Client(), "https://example.test", payload={}, headers={}
     )
 
@@ -640,6 +647,7 @@ def test_anthropic_retry_recupera_erro_de_transporte(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import httpx
+    import meet.llm_providers as llm_mod
 
     calls: list[int] = []
 
@@ -650,8 +658,8 @@ def test_anthropic_retry_recupera_erro_de_transporte(
                 raise httpx.ConnectError("temporário")
             return httpx.Response(200)
 
-    monkeypatch.setattr(extract_mod, "_HTTP_RETRY_DELAYS", (0.0,))
-    response = extract_mod._anthropic_post_with_retry(
+    monkeypatch.setattr(llm_mod, "_HTTP_RETRY_DELAYS", (0.0,))
+    response = llm_mod._anthropic_post_with_retry(
         Client(), "https://example.test", payload={}, headers={}
     )
 
@@ -881,9 +889,11 @@ def test_openai_oauth_provider_consome_stream_responses(
     assert captured["url"] == "https://chatgpt.com/backend-api/codex/responses"
     assert captured["headers"]["ChatGPT-Account-ID"] == "account-123"
     assert captured["json"]["model"] == "gpt-5.6-terra"
-    assert captured["headers"]["version"] == extract_mod._CODEX_CLIENT_VERSION
+    import meet.llm_providers as llm_mod
+
+    assert captured["headers"]["version"] == llm_mod._CODEX_CLIENT_VERSION
     assert catalog_calls[0]["params"] == {
-        "client_version": extract_mod._CODEX_CLIENT_VERSION
+        "client_version": llm_mod._CODEX_CLIENT_VERSION
     }
     assert captured["json"]["instructions"] == "system prompt"
     assert captured["json"]["input"][0]["content"][0]["text"] == "transcrição"
@@ -1323,13 +1333,6 @@ def test_claude_code_nonzero_exit_raises(monkeypatch: pytest.MonkeyPatch) -> Non
 # ---------------------------------------------------------------------------
 # Traceable extraction: parse_hms, normalize_assigned_to, validate_evidence
 # ---------------------------------------------------------------------------
-
-from meet.extract import (
-    _fact_from_dict,
-    _normalize_assigned_to,
-    _parse_hms,
-    _validate_evidence,
-)
 
 
 def test_parse_hms_valid() -> None:

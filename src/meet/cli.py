@@ -222,6 +222,29 @@ def serve(
 
     from .web.app import create_app
 
+    loopback = host in {"127.0.0.1", "localhost", "::1", "[::1]"}
+    import os
+
+    allow_remote = os.environ.get("MEET_ALLOW_REMOTE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not loopback and not allow_remote:
+        err_console.print(
+            f"[red]Host {host!r} não é loopback.[/red] A API não tem autenticação "
+            "e pode expor gravações/tokens na rede.\n"
+            "Use o default 127.0.0.1, ou defina [bold]MEET_ALLOW_REMOTE=1[/bold] "
+            "se você entende o risco."
+        )
+        raise typer.Exit(1)
+    if not loopback and allow_remote:
+        err_console.print(
+            "[yellow]Aviso:[/yellow] bind não-loopback com MEET_ALLOW_REMOTE=1 — "
+            "qualquer cliente na rede alcança a API sem senha."
+        )
+
     url = f"http://{host}:{port}"
     console.print(f"[bold green]meet UI[/bold green] → {url}")
     if open_browser:
@@ -298,13 +321,16 @@ def speakers_assign(
     from . import render as render_mod
 
     md_content = render_mod.to_markdown(result)
-    result.md_path.write_text(md_content, encoding="utf-8")  # type: ignore[attr-defined]
+    if result.md_path is None:
+        err_console.print(f"[red]Erro:[/red] Reunião {meeting_id} sem md_path.")
+        raise typer.Exit(1)
+    result.md_path.write_text(md_content, encoding="utf-8")
 
     console.print(
         f"[green]✓[/green] Falante '{label}' identificado como '{name}'"
         f" na reunião {meeting_id}."
     )
-    console.print(f"  Markdown atualizado: {result.md_path}")  # type: ignore[attr-defined]
+    console.print(f"  Markdown atualizado: {result.md_path}")
 
 
 @speakers_app.command("rename")

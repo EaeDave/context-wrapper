@@ -13,7 +13,6 @@ Contracts defended:
 
 from __future__ import annotations
 
-import pytest
 
 from meet.merge import assign_speakers, combine, rename_speakers
 from meet.models import ME, SpeakerTurn, TranscriptSegment, Word

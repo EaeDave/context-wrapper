@@ -175,42 +175,23 @@ def _auth_path(settings) -> Path:
 
 def load_tokens(settings) -> dict | None:
     """Carrega tokens openai do auth.json. Retorna None se ausente ou inválido."""
-    path = _auth_path(settings)
-    if not path.is_file():
-        return None
-    try:
-        d = json.loads(path.read_text())
-        return d.get("openai") or None
-    except Exception:
-        return None
+    from .auth_store import load_provider
+
+    return load_provider(_auth_path(settings), "openai")
 
 
 def save_tokens(settings, d: dict) -> None:
-    """Persiste tokens em auth.json sob chave 'openai' (chmod 600, preserva demais providers)."""
-    path = _auth_path(settings)
-    existing: dict = {}
-    if path.is_file():
-        try:
-            existing = json.loads(path.read_text())
-        except Exception:
-            pass
-    existing["openai"] = d
-    path.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
-    path.chmod(0o600)
+    """Persiste tokens em auth.json sob chave 'openai' (chmod 600, lock compartilhado)."""
+    from .auth_store import save_provider
+
+    save_provider(_auth_path(settings), "openai", d)
 
 
 def clear_tokens(settings) -> None:
     """Remove entrada 'openai' do auth.json, preservando outros providers."""
-    path = _auth_path(settings)
-    if not path.is_file():
-        return
-    try:
-        existing = json.loads(path.read_text())
-        existing.pop("openai", None)
-        path.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
-        path.chmod(0o600)
-    except Exception:
-        pass
+    from .auth_store import clear_provider
+
+    clear_provider(_auth_path(settings), "openai")
 
 
 # Namespace keys do JWT OpenAI: os valores são *dicts*, não strings dotadas.
@@ -287,6 +268,14 @@ def get_access_token(settings, rejected_access: str | None = None) -> str:
     rejected_access: token que resultou em 401 — forçar renovação mesmo sem expirar
     no cache (ex. 401 concorrente recebido por outro thread).
     """
+    from .auth_store import (
+        clear_provider_unlocked,
+        exclusive,
+        load_provider_unlocked,
+        save_provider_unlocked,
+    )
+
+    path = _auth_path(settings)
     tokens = load_tokens(settings)
     if not tokens:
         raise ValueError(
@@ -301,39 +290,47 @@ def get_access_token(settings, rejected_access: str | None = None) -> str:
     if tokens.get("expires", 0) > now_ms and current_access != rejected_access:
         return current_access
 
-    # Refresh serializado: apenas uma thread renova por vez
+    # Cross-process + thread: read→refresh→write sob lock de auth.json
     with _REFRESH_LOCK:
-        # Re-ler dentro do lock — pode ter sido renovado por outra thread enquanto esperava
-        tokens = load_tokens(settings)
-        if not tokens:
-            raise ValueError(
-                "Não autenticado com OpenAI. "
-                "Acesse a página Configurações para conectar."
-            )
-        now_ms = int(time.time() * 1000)
-        current_access = tokens.get("access", "")
-        if tokens.get("expires", 0) > now_ms and current_access != rejected_access:
-            return current_access
-
-        if not tokens.get("refresh"):
-            raise ValueError(
-                "Sessão OpenAI expirada sem refresh token. "
-                "Reconecte na página Configurações."
-            )
-
-        try:
-            d = refresh(tokens["refresh"])
-        except RuntimeError as exc:
-            exc_str = str(exc).lower()
-            if any(e in exc_str for e in _PERMANENT_ERRORS):
-                clear_tokens(settings)
+        with exclusive(path):
+            tokens = load_provider_unlocked(path, "openai")
+            if not tokens:
                 raise ValueError(
-                    "Sessão OpenAI expirada ou revogada. "
-                    "Reconecte sua conta na página Configurações."
-                ) from exc
-            raise
+                    "Não autenticado com OpenAI. "
+                    "Acesse a página Configurações para conectar."
+                )
+            now_ms = int(time.time() * 1000)
+            current_access = tokens.get("access", "")
+            if tokens.get("expires", 0) > now_ms and current_access != rejected_access:
+                return current_access
 
-        new_tokens = build_stored_tokens(d, fallback=tokens)
-        save_tokens(settings, new_tokens)
+            if not tokens.get("refresh"):
+                raise ValueError(
+                    "Sessão OpenAI expirada sem refresh token. "
+                    "Reconecte na página Configurações."
+                )
+
+            attempted_refresh = tokens.get("refresh")
+            try:
+                d = refresh(attempted_refresh)
+            except RuntimeError as exc:
+                exc_str = str(exc).lower()
+                if any(e in exc_str for e in _PERMANENT_ERRORS):
+                    current = load_provider_unlocked(path, "openai")
+                    if current and current.get("refresh") != attempted_refresh:
+                        if (
+                            current.get("expires", 0) > int(time.time() * 1000)
+                            and current.get("access") != rejected_access
+                        ):
+                            return current["access"]
+                    clear_provider_unlocked(path, "openai")
+                    raise ValueError(
+                        "Sessão OpenAI expirada ou revogada. "
+                        "Reconecte sua conta na página Configurações."
+                    ) from exc
+                raise
+
+            new_tokens = build_stored_tokens(d, fallback=tokens)
+            save_provider_unlocked(path, "openai", new_tokens)
 
     return new_tokens["access"]

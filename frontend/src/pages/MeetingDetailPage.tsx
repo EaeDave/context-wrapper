@@ -525,7 +525,11 @@ export default function MeetingDetailPage() {
             onSeek={navigateToEvidence}
           />
 
-          <MeetingFacts facts={meeting.facts ?? []} onSeek={navigateToEvidence} />
+          <MeetingFacts
+            facts={meeting.facts ?? []}
+            meetingId={meeting.id}
+            onSeek={navigateToEvidence}
+          />
 
           <Transcript
             meetingId={meetingId}

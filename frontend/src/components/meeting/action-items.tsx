@@ -124,6 +124,34 @@ export function ActionItems({ meetingId, items, onSeek }: ActionItemsProps) {
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["meeting", meetingId] }),
   })
 
+  const reviewMutation = useMutation({
+    mutationFn: ({
+      id,
+      review_status,
+    }: {
+      id: number
+      review_status: ActionItem["review_status"]
+    }) => api.updateActionItem(id, { review_status }),
+    onMutate: async ({ id, review_status }) => {
+      await queryClient.cancelQueries({ queryKey: ["meeting", meetingId] })
+      const prev = queryClient.getQueryData<MeetingDetail>(["meeting", meetingId])
+      if (prev) {
+        queryClient.setQueryData<MeetingDetail>(["meeting", meetingId], {
+          ...prev,
+          action_items: prev.action_items.map((it) =>
+            it.id === id ? { ...it, review_status } : it,
+          ),
+        })
+      }
+      return { prev }
+    },
+    onError: (_e, _v, ctx) => {
+      if (ctx?.prev) queryClient.setQueryData(["meeting", meetingId], ctx.prev)
+      toast.error("Erro ao atualizar revisão")
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["meeting", meetingId] }),
+  })
+
   // ── Update item ────────────────────────────────────────────────────────────
   const updateMutation = useMutation({
     mutationFn: ({ id, form }: { id: number; form: ItemForm }) =>
@@ -272,17 +300,36 @@ export function ActionItems({ meetingId, items, onSeek }: ActionItemsProps) {
                     )}
                     {/* Traceable metadata row */}
                     <div className="mt-1 flex flex-wrap items-center gap-1">
-                      <Badge
-                        variant={item.review_status === "confirmed" ? "secondary" : "outline"}
-                        className={cn(
-                          "h-4 px-1 text-[10px]",
+                      <button
+                        type="button"
+                        title={
                           item.review_status === "confirmed"
-                            ? "border-green-500 text-green-700 dark:text-green-400"
-                            : "border-amber-500 text-amber-600 dark:text-amber-400",
-                        )}
+                            ? "Marcar como precisa revisar"
+                            : "Confirmar revisão humana"
+                        }
+                        onClick={() =>
+                          reviewMutation.mutate({
+                            id: item.id,
+                            review_status:
+                              item.review_status === "confirmed"
+                                ? "needs_review"
+                                : "confirmed",
+                          })
+                        }
+                        className="inline-flex"
                       >
-                        {item.review_status === "confirmed" ? "confirmado" : "revisar"}
-                      </Badge>
+                        <Badge
+                          variant={item.review_status === "confirmed" ? "secondary" : "outline"}
+                          className={cn(
+                            "h-4 cursor-pointer px-1 text-[10px]",
+                            item.review_status === "confirmed"
+                              ? "border-green-500 text-green-700 dark:text-green-400"
+                              : "border-amber-500 text-amber-600 dark:text-amber-400",
+                          )}
+                        >
+                          {item.review_status === "confirmed" ? "confirmado" : "revisar"}
+                        </Badge>
+                      </button>
                       <Badge
                         variant="outline"
                         className="h-4 px-1 text-[10px] text-muted-foreground"
