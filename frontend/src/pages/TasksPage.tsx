@@ -25,6 +25,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { cn, copyToClipboard } from "@/lib/utils"
+import { displaySpeaker } from "@/lib/format"
 import {
   Select,
   SelectContent,
@@ -390,14 +391,14 @@ function TaskItem({
           {/* Requested by */}
           {task.requested_by && (
             <span className="text-xs text-muted-foreground">
-              <span className="opacity-60">de:</span> {task.requested_by}
+              <span className="opacity-60">de:</span> {displaySpeaker(task.requested_by)}
             </span>
           )}
 
           {/* Assigned to */}
           {task.assigned_to && task.assigned_to.length > 0 && (
             <span className="text-xs text-muted-foreground">
-              <span className="opacity-60">para:</span> {task.assigned_to.join(", ")}
+              <span className="opacity-60">para:</span> {task.assigned_to.map(displaySpeaker).join(", ")}
             </span>
           )}
 

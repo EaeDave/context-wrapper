@@ -412,6 +412,18 @@ class JobManager:
             with self._lock:
                 job.meeting_id = meeting_id
                 job.result_path = str(md_path)
+            # Pre-warm: encadeia o mix pro preview já estar pronto quando o
+            # usuário abrir a reunião. Source pós-import (mídia pode ter movido).
+            result = store.get_meeting(meeting_id)
+            if result is not None and result.source and Path(result.source).is_file():
+                src = Path(result.source)
+                self.submit(
+                    kind="mix",
+                    label=f"mix · {src.name}",
+                    video=str(src),
+                    mic_track=int(job.params.get("mic_track", 1)),
+                    others_track=int(job.params.get("others_track", 2)),
+                )
             return
 
         if job.kind == "mix":
@@ -423,8 +435,8 @@ class JobManager:
             )
             tracker = ProgressTracker(
                 (
-                    StepSpec("preview_full", "Preview original", 1.0),
                     StepSpec("preview_web", "Preview web", 1.0),
+                    StepSpec("preview_full", "Preview original", 1.0),
                     StepSpec("audio_mix", "Mix de áudio", 1.0),
                 ),
                 progress,
@@ -433,22 +445,22 @@ class JobManager:
             video = Path(job.params["video"])
             mic = int(job.params.get("mic_track", 1))
             others = int(job.params.get("others_track", 2))
-            tracker.start("preview_full", "Gerando preview original (full)…", determinate=False)
+            tracker.start("preview_web", "Gerando preview leve (web)…", determinate=False)
             try:
                 out = ensure_listen_preview(
                     video,
                     force=True,
                     mic_track=mic,
                     others_track=others,
-                    quality=PREVIEW_FULL,
+                    quality=PREVIEW_WEB,
                 )
-                tracker.start("preview_web", "Gerando preview leve (web)…", determinate=False)
+                tracker.start("preview_full", "Gerando preview original (full)…", determinate=False)
                 ensure_listen_preview(
                     video,
                     force=True,
                     mic_track=mic,
                     others_track=others,
-                    quality=PREVIEW_WEB,
+                    quality=PREVIEW_FULL,
                 )
             except Exception:
                 tracker.start("audio_mix", "Sem vídeo — gerando só áudio…", determinate=False)

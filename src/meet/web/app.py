@@ -839,6 +839,15 @@ def create_app() -> FastAPI:
         path = Path(result.source)
         if not path.is_file():
             raise HTTPException(400, "Arquivo fonte não encontrado no disco")
+        # Idempotente: já tem mix queued/running pro mesmo vídeo → retorna ele
+        # (frontend auto-dispara ao abrir a página; evita empilhar duplicados).
+        for existing in manager.list_recent(50):
+            if (
+                existing.kind == "mix"
+                and existing.status in (JobStatus.queued, JobStatus.running)
+                and existing.params.get("video") == str(path)
+            ):
+                return _serialize_job(existing)
         job = manager.submit(kind="mix", label=f"mix · {path.name}", video=str(path))
         return _serialize_job(job)
 
@@ -1775,6 +1784,8 @@ def create_app() -> FastAPI:
             if candidate.is_file() and candidate.is_relative_to(DIST_DIR):
                 media = mimetypes.guess_type(str(candidate))[0] or "application/octet-stream"
                 return FileResponse(str(candidate), media_type=media)
-        return FileResponse(str(index))
+        # no-cache: browser revalida o index a cada load — sem isso, cache
+        # heurístico segura SPA antigo após rebuild (assets são content-hashed).
+        return FileResponse(str(index), headers={"Cache-Control": "no-cache"})
 
     return app

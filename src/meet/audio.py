@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import select
@@ -67,6 +68,26 @@ def _ffmpeg_timeout_error(limit: float) -> RuntimeError:
     return RuntimeError(
         f"ffmpeg timeout após {limit:.0f}s — arquivo corrompido ou travado?"
     )
+
+
+@functools.lru_cache(maxsize=1)
+def _nvenc_available() -> bool:
+    """True se o ffmpeg consegue encodar H.264 via NVENC (GPU NVIDIA)."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                # 256x256: NVENC rejeita frames menores que o mínimo suportado
+                "-f", "lavfi", "-i", "testsrc2=d=0.1:s=256x256",
+                "-c:v", "h264_nvenc", "-f", "null", "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_FFPROBE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
 
 
 def probe_audio_streams(input_path: Path) -> int:
@@ -447,6 +468,9 @@ def export_listen_preview(
 
     - ``max_width > 0``: limita largura (qualidade web / 720p-ish)
     - ``max_width == 0``: mantém resolução original (qualidade full)
+
+    Usa H.264 via NVENC (GPU) quando disponível; se o encode NVENC falhar em
+    runtime, refaz em CPU com libx264 (mesmo vf/filter_complex e profile Main).
     """
     n_audio = probe_audio_streams(input_path)
     if probe_video_streams(input_path) < 1:
@@ -460,50 +484,75 @@ def export_listen_preview(
     # full = sem downscale, só garante yuv420p; web = scale ≤ max_width
     if max_width and max_width > 0:
         vf = f"scale='min({max_width},iw)':-2,format=yuv420p"
-        crf, level, abitrate = "22", "4.0", "160k"
+        crf, cq, level, abitrate = "22", "26", "4.0", "160k"
     else:
         vf = "format=yuv420p"
         # original res @60fps precisa L5.1; Main profile ainda é browser-ok
-        crf, level, abitrate = "18", "5.1", "192k"
+        crf, cq, level, abitrate = "18", "21", "5.1", "192k"
 
-    video_audio_out = [
+    # NVENC (GPU): Main profile mantém o preview browser-safe (_preview_is_browser_safe
+    # rejeita High). Fallback CPU usa libx264 com os mesmos vf/level.
+    nvenc_args = [
+        "-c:v", "h264_nvenc",
+        "-preset", "p4",
+        "-tune", "hq",
+        "-rc", "vbr",
+        "-cq", cq,
+        "-b:v", "0",
+        "-profile:v", "main",
+        "-level", level,
+        "-pix_fmt", "yuv420p",
+    ]
+    x264_args = [
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-crf", crf,
         "-profile:v", "main",
         "-level", level,
         "-pix_fmt", "yuv420p",
+    ]
+    audio_out = [
         "-c:a", "aac",
         "-b:a", abitrate,
         "-movflags", "+faststart",
         str(output_path),
     ]
 
-    if n_audio < 2:
+    def _encode(codec_args: list[str]) -> None:
+        video_audio_out = [*codec_args, *audio_out]
+        if n_audio < 2:
+            _run_ffmpeg([
+                "-i", str(input_path),
+                "-map", "0:v:0",
+                "-map", "0:a:0",
+                "-vf", vf,
+                *video_audio_out,
+            ])
+            return
+        mic_idx = mic_track - 1
+        others_idx = others_track - 1
+        filter_str = (
+            f"[0:v:0]{vf}[v];"
+            f"[0:a:{mic_idx}][0:a:{others_idx}]"
+            f"amix=inputs=2:duration=longest:normalize=0,"
+            f"alimiter=limit=0.95[a]"
+        )
         _run_ffmpeg([
             "-i", str(input_path),
-            "-map", "0:v:0",
-            "-map", "0:a:0",
-            "-vf", vf,
+            "-filter_complex", filter_str,
+            "-map", "[v]",
+            "-map", "[a]",
             *video_audio_out,
         ])
-        return output_path
 
-    mic_idx = mic_track - 1
-    others_idx = others_track - 1
-    filter_str = (
-        f"[0:v:0]{vf}[v];"
-        f"[0:a:{mic_idx}][0:a:{others_idx}]"
-        f"amix=inputs=2:duration=longest:normalize=0,"
-        f"alimiter=limit=0.95[a]"
-    )
-    _run_ffmpeg([
-        "-i", str(input_path),
-        "-filter_complex", filter_str,
-        "-map", "[v]",
-        "-map", "[a]",
-        *video_audio_out,
-    ])
+    # Fallback em runtime: NVENC pode falhar (driver/sessões esgotadas) → libx264.
+    if _nvenc_available():
+        try:
+            _encode(nvenc_args)
+        except RuntimeError:
+            _encode(x264_args)
+    else:
+        _encode(x264_args)
     return output_path
 
 

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react"
+import { useState, useRef, useCallback, useEffect } from "react"
 import { useParams, useNavigate } from "react-router"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
@@ -22,7 +22,7 @@ import {
 } from "lucide-react"
 import type { MeetingDetail, Project } from "@/lib/types"
 import * as api from "@/lib/api"
-import { formatDuration } from "@/lib/format"
+import { formatDuration, displaySpeaker } from "@/lib/format"
 import { copyToClipboard } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -79,6 +79,13 @@ function speakerBadgeClass(name: string): string {
   if (/^SPEAKER_\d+$/.test(name))
     return "bg-amber-500/20 text-amber-700 border-amber-500/40 dark:text-amber-300"
   return "bg-emerald-500/20 text-emerald-700 border-emerald-500/40 dark:text-emerald-300"
+}
+
+/** True enquanto o preview (vídeo) / mix (áudio) de escuta ainda não existe. */
+function listenMediaPending(m: MeetingDetail): boolean {
+  if (!m.source_exists) return false
+  if (m.has_video) return !m.preview_ready && !m.preview_full_ready
+  return !m.mix_ready
 }
 
 // ─── Download helper ──────────────────────────────────────────────────────────
@@ -179,7 +186,7 @@ function MeetingHeader({ meeting, onRename, onDelete, onRemix, onReextract, onRe
                     variant="outline"
                     className={cn("text-xs gap-1", speakerBadgeClass(p))}
                   >
-                    {p}
+                    {displaySpeaker(p)}
                     {sim != null && (
                       <span
                         title={`reconhecido por voz — similaridade ${sim.toFixed(2)}`}
@@ -336,7 +343,25 @@ export default function MeetingDetailPage() {
     queryKey: ["meeting", meetingId],
     queryFn: () => api.getMeeting(meetingId),
     enabled: !Number.isNaN(meetingId),
+    // Mídia de escuta pendente → poll até o job de mix gerar preview/áudio.
+    refetchInterval: (query) => {
+      const m = query.state.data
+      return m && listenMediaPending(m) ? 4000 : false
+    },
   })
+
+  // Auto-dispara o job de mix quando preview/áudio ainda não existem.
+  // Backend é idempotente (retorna o job ativo se já houver um pro vídeo).
+  const mixTriggeredRef = useRef(false)
+  useEffect(() => {
+    if (!meeting || mixTriggeredRef.current) return
+    if (!listenMediaPending(meeting)) return
+    mixTriggeredRef.current = true
+    api.mixMeeting(meetingId).then(
+      () => queryClient.invalidateQueries({ queryKey: ["jobs"] }),
+      () => {}, // silencioso — usuário ainda pode usar "Remixar" manual
+    )
+  }, [meeting, meetingId, queryClient])
 
   const projectsQuery = useQuery<Project[]>({
     queryKey: ["projects"],

@@ -148,9 +148,11 @@ export function Player({ meeting, onTimeUpdate, ref }: PlayerProps) {
 
   if (!meeting.source_exists) return null
 
+  // v= cache-bust: quando o preview fica pronto (poll da página), o src muda e
+  // o <video> recarrega em vez de ficar preso no 409 anterior.
   const src = meeting.has_video
-    ? `/meetings/${meeting.id}/preview?q=${quality}`
-    : `/meetings/${meeting.id}/audio`
+    ? `/meetings/${meeting.id}/preview?q=${quality}&v=${meeting.preview_ready ? "w" : ""}${meeting.preview_full_ready ? "f" : ""}`
+    : `/meetings/${meeting.id}/audio?v=${meeting.mix_ready ? 1 : 0}`
 
   // Preview may be generated on first request by ffmpeg (on-demand).
   const previewPending =

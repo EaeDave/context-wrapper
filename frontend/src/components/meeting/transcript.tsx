@@ -22,7 +22,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { formatTs } from "@/lib/format"
+import { formatTs, displaySpeaker } from "@/lib/format"
 import { cn } from "@/lib/utils"
 
 /** CSS class for a speaker label — shared convention. */
@@ -267,7 +267,7 @@ export function Transcript({
                   <div>
                     <div className="flex flex-wrap items-center gap-2">
                       <span className={cn("inline-flex items-center gap-1 text-xs", speakerClass(g.speaker))}>
-                        {g.speaker}
+                        {displaySpeaker(g.speaker)}
                         {speakerMatches?.[g.speaker] != null && (
                           <span
                             title={`reconhecido por voz — similaridade ${speakerMatches[g.speaker].toFixed(2)}`}
@@ -383,7 +383,7 @@ export function Transcript({
                   <SelectContent>
                     {participants.map((p) => (
                       <SelectItem key={p} value={p}>
-                        {p}
+                        {displaySpeaker(p)}
                       </SelectItem>
                     ))}
                   </SelectContent>

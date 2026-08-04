@@ -32,3 +32,8 @@ export function formatSize(bytes: number): string {
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }
+
+/** Nome de exibição do falante: "me" (mic) vira "Eu". */
+export function displaySpeaker(name: string): string {
+  return name === "me" ? "Eu" : name
+}

@@ -536,3 +536,54 @@ def test_job_concluido_preserva_erro_nao_fatal(
     assert job.progress.percent == 100.0
     assert [step.state for step in job.progress.steps] == ["done", "done", "error"]
     assert job.progress.detail == "Mídia não importada: disco cheio"
+
+
+def test_api_mix_idempotente_enquanto_job_ativo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """POST /mix com job queued/running pro mesmo vídeo retorna o job existente.
+
+    Contrato do auto-disparo do frontend: abrir a página várias vezes não pode
+    empilhar jobs de mix duplicados. Job terminado → novo POST cria job novo.
+    """
+    import threading
+
+    from fastapi.testclient import TestClient
+
+    import meet.web.app as app_module
+    from meet.config import Settings
+    from meet.models import MeetingResult
+    from meet.store import Store
+
+    release = threading.Event()
+
+    def run(self: JobManager, job: Job) -> None:
+        release.wait(timeout=5)
+
+    monkeypatch.setattr(JobManager, "_run", run)
+    mgr = JobManager(db_path=tmp_path / "jobs.db")
+    monkeypatch.setattr(app_module, "manager", mgr)
+
+    src = tmp_path / "video.mkv"
+    src.write_bytes(b"fake")
+    store = Store(tmp_path / "meet.db")
+    mid = store.save_meeting(
+        MeetingResult(source=str(src), date="2026-08-04", title="Mix", duration=60.0),
+        tmp_path / "m.md",
+    )
+    settings = Settings(data_dir=tmp_path / "data", output_dir=tmp_path / "out")
+    monkeypatch.setattr(app_module, "_settings_store", lambda: (settings, store))
+
+    client = TestClient(app_module.create_app(), raise_server_exceptions=True)
+    try:
+        r1 = client.post(f"/api/meetings/{mid}/mix")
+        r2 = client.post(f"/api/meetings/{mid}/mix")
+        assert r1.status_code == 200 and r2.status_code == 200
+        assert r1.json()["id"] == r2.json()["id"]
+    finally:
+        release.set()
+
+    # Job terminou → próximo POST enfileira um job novo.
+    _wait_for_status(mgr, r1.json()["id"])
+    r3 = client.post(f"/api/meetings/{mid}/mix")
+    assert r3.json()["id"] != r1.json()["id"]

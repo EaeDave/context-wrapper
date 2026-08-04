@@ -1,11 +1,11 @@
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { ClipboardList, Copy, Pencil, Plus, Trash2, Clock } from "lucide-react"
 import { useQueryClient, useMutation } from "@tanstack/react-query"
 import { toast } from "sonner"
 import type { ActionItem, MeetingDetail } from "@/lib/types"
 import * as api from "@/lib/api"
 import { copyToClipboard } from "@/lib/utils"
-import { formatTs } from "@/lib/format"
+import { formatTs, displaySpeaker } from "@/lib/format"
 import { EvidenceThumbnails } from "@/components/meeting/visual-evidence"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -53,6 +53,9 @@ const PRIORITY_VARIANT = {
   baixa: "secondary",
 } as const satisfies Record<ActionItem["priority"], "destructive" | "outline" | "secondary">
 
+// Valor sentinela do filtro para itens sem responsável (nunca colide com nome real)
+const NO_ASSIGNEE = "__sem_responsavel__"
+
 // ── Form state (editable fields only; traceable metadata is read-only) ─────────
 interface ItemForm {
   what: string
@@ -99,6 +102,35 @@ export function ActionItems({ meetingId, items, onSeek }: ActionItemsProps) {
   const [deleteItemId, setDeleteItemId] = useState<number | null>(null)
   const [addOpen, setAddOpen] = useState(false)
   const [addForm, setAddForm] = useState<ItemForm>(emptyForm())
+
+  // ── Filtro por responsável (client-side) ───────────────────────────────────
+  const [assigneeFilter, setAssigneeFilter] = useState<string>("all")
+
+  // Lista única de responsáveis (nome individual, trim)
+  const assignees = useMemo(() => {
+    const set = new Set<string>()
+    for (const it of items) {
+      for (const name of it.assigned_to ?? []) {
+        const n = name.trim()
+        if (n) set.add(n)
+      }
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "pt-BR"))
+  }, [items])
+
+  const hasUnassigned = useMemo(
+    () => items.some((it) => !it.assigned_to || it.assigned_to.length === 0),
+    [items],
+  )
+
+  const filteredItems = useMemo(() => {
+    if (assigneeFilter === "all") return items
+    if (assigneeFilter === NO_ASSIGNEE)
+      return items.filter((it) => !it.assigned_to || it.assigned_to.length === 0)
+    return items.filter((it) =>
+      (it.assigned_to ?? []).some((n) => n.trim() === assigneeFilter),
+    )
+  }, [items, assigneeFilter])
 
   // ── Toggle status (optimistic) ─────────────────────────────────────────────
   const toggleMutation = useMutation({
@@ -231,6 +263,24 @@ export function ActionItems({ meetingId, items, onSeek }: ActionItemsProps) {
             Action items
           </CardTitle>
           <div className="flex items-center gap-1">
+            {items.length > 0 && (
+              <Select value={assigneeFilter} onValueChange={setAssigneeFilter}>
+                <SelectTrigger className="h-7 w-[150px] text-xs">
+                  <SelectValue placeholder="Responsável" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Todos</SelectItem>
+                  {hasUnassigned && (
+                    <SelectItem value={NO_ASSIGNEE}>Sem responsável</SelectItem>
+                  )}
+                  {assignees.map((name) => (
+                    <SelectItem key={name} value={name}>
+                      {displaySpeaker(name)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
             <Button
               variant="ghost"
               size="icon"
@@ -273,7 +323,7 @@ export function ActionItems({ meetingId, items, onSeek }: ActionItemsProps) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {items.map((item) => (
+              {filteredItems.map((item) => (
                 <TableRow key={item.id} className={cn(item.status === "feito" && "opacity-60")}>
                   <TableCell className="pl-6">
                     <Checkbox
@@ -364,8 +414,8 @@ export function ActionItems({ meetingId, items, onSeek }: ActionItemsProps) {
                   </TableCell>
                   <TableCell className="text-sm text-muted-foreground">
                     {item.assigned_to && item.assigned_to.length > 0
-                      ? item.assigned_to.join(", ")
-                      : (item.requested_by ?? "—")}
+                      ? item.assigned_to.map(displaySpeaker).join(", ")
+                      : (item.requested_by ? displaySpeaker(item.requested_by) : "—")}
                   </TableCell>
                   <TableCell className="text-sm text-muted-foreground">
                     {item.where ?? "—"}
@@ -408,6 +458,16 @@ export function ActionItems({ meetingId, items, onSeek }: ActionItemsProps) {
                   </TableCell>
                 </TableRow>
               ))}
+              {filteredItems.length === 0 && (
+                <TableRow>
+                  <TableCell
+                    colSpan={7}
+                    className="py-6 text-center text-sm text-muted-foreground"
+                  >
+                    Nenhuma tarefa para este responsável.
+                  </TableCell>
+                </TableRow>
+              )}
             </TableBody>
           </Table>
         </CardContent>
